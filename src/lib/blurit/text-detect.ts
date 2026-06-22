@@ -69,9 +69,9 @@ async function loadWorker(): Promise<TesseractWorker | null> {
         errorHandler: (e: unknown) =>
           console.error("[BlurIt tesseract err]", e),
       })) as unknown as TesseractWorker;
-      // PSM 3 = AUTO: full page segmentation. Best all-rounder for documents,
-      // signs, plates, and mixed content. PSM 11 (sparse) missed clear text.
-      await worker.setParameters({ tessedit_pageseg_mode: "3" });
+      // PSM 11 = SPARSE_TEXT: find text anywhere in the image without assuming
+      // a document layout. Best for photos with scattered signs/watermarks.
+      await worker.setParameters({ tessedit_pageseg_mode: "11" });
       return worker;
     })();
   }
@@ -292,11 +292,12 @@ function preprocessForOcr(
 
 function isLikelyRealText(text: string): boolean {
   const t = text.trim();
-  if (t.length < 2) return false;
+  // Require at least 3 chars to filter 1-2 letter noise fragments.
+  if (t.length < 3) return false;
   const alnum = (t.match(/[a-zA-Z0-9]/g) ?? []).length;
   const nonSpace = t.replace(/\s/g, "").length;
   if (nonSpace === 0) return false;
-  return alnum >= 2 && alnum / nonSpace > 0.4;
+  return alnum >= 3 && alnum / nonSpace > 0.5;
 }
 
 export async function terminateTextWorker(): Promise<void> {

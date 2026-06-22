@@ -31,8 +31,10 @@ export async function detectFaces(
   naturalWidth: number,
   naturalHeight: number,
 ): Promise<DetectionResult> {
-  // 1000px canvas — best balance of small-face recall and speed.
-  const MAX = 1000;
+  // 1600px canvas — large enough to keep small faces (crowds) detectable.
+  // BlazeFace downsamples internally to 128px, so bigger input = relatively
+  // bigger faces for the model.
+  const MAX = 1600;
   const scale =
     Math.max(naturalWidth, naturalHeight) > MAX
       ? MAX / Math.max(naturalWidth, naturalHeight)
@@ -83,15 +85,56 @@ export async function detectFaces(
   }
 
   // 2. BlazeFace via TensorFlow.js (self-hosted model).
+  //    Multi-scale: run on full image + 4 overlapping quadrants to catch
+  //    small/distant faces in crowd scenes. BlazeFace downsamples to 128px
+  //    internally, so quadrants (2x zoom) make small faces detectable.
   try {
-    const faces = await detectWithBlazeFace(
+    const fullFaces = await detectWithBlazeFace(
       detectCanvas,
       dw,
       dh,
       naturalWidth,
       naturalHeight,
     );
-    return buildResult(faces, true, "blazeface");
+    // Run on quadrants only if the image is large enough to benefit.
+    const quadFaces: FaceRegion[] = [];
+    if (dw >= 600 && dh >= 600) {
+      const hw = Math.floor(dw / 2);
+      const hh = Math.floor(dh / 2);
+      const overlap = 0.15; // 15% overlap between quadrants
+      const ox = Math.floor(hw * overlap);
+      const oy = Math.floor(hh * overlap);
+      const quads = [
+        { x: 0, y: 0, w: hw + ox, h: hh + oy },
+        { x: hw - ox, y: 0, w: hw + ox, h: hh + oy },
+        { x: 0, y: hh - oy, w: hw + ox, h: hh + oy },
+        { x: hw - ox, y: hh - oy, w: hw + ox, h: hh + oy },
+      ];
+      const results = await Promise.all(
+        quads.map(async (q) => {
+          const qc = document.createElement("canvas");
+          qc.width = q.w;
+          qc.height = q.h;
+          const qctx = qc.getContext("2d", { willReadFrequently: true });
+          if (!qctx) return [];
+          qctx.drawImage(detectCanvas, q.x, q.y, q.w, q.h, 0, 0, q.w, q.h);
+          return detectWithBlazeFace(
+            qc,
+            q.w,
+            q.h,
+            naturalWidth,
+            naturalHeight,
+            q.x,
+            q.y,
+            dw,
+            dh,
+          );
+        }),
+      );
+      quadFaces.push(...results.flat());
+    }
+    const allFaces = nms([...fullFaces, ...quadFaces], 0.4);
+    return buildResult(allFaces, true, "blazeface");
   } catch {
     // fall through to manual
   }
@@ -205,9 +248,10 @@ async function loadBlazeFace(): Promise<BlazeFaceModel | null> {
       const blazeface = await import("@tensorflow-models/blazeface");
       const model = await blazeface.load({
         maxFaces: 100,
-        // Low threshold (0.3) catches more faces, including small/partial/
-        // rotated ones. NMS removes the resulting duplicates.
-        scoreThreshold: 0.3,
+        // Very low threshold (0.2) to catch small/distant faces in crowds.
+        // NMS removes duplicates. False positives are preferable to missed
+        // faces — the user can always erase unwanted blur regions.
+        scoreThreshold: 0.2,
         // Self-hosted model — same origin, no third-party fetch.
         modelUrl: "/models/blazeface/model.json",
       });
@@ -219,34 +263,44 @@ async function loadBlazeFace(): Promise<BlazeFaceModel | null> {
 
 async function detectWithBlazeFace(
   canvas: HTMLCanvasElement,
-  dw: number,
-  dh: number,
+  canvasW: number,
+  canvasH: number,
   naturalWidth: number,
   naturalHeight: number,
+  offsetX = 0,
+  offsetY = 0,
+  sourceW?: number,
+  sourceH?: number,
 ): Promise<FaceRegion[]> {
   const model = await loadBlazeFace();
   if (!model) return [];
 
   const preds = await model.estimateFaces(canvas, false, false, false);
-  const upScaleX = naturalWidth / dw;
-  const upScaleY = naturalHeight / dh;
+  // Scale from canvas coords to natural image coords.
+  // For quadrants: canvasW/H is the quadrant size, sourceW/H is the full
+  // detection canvas size. The quadrant was cropped from (offsetX, offsetY).
+  const refW = sourceW ?? canvasW;
+  const refH = sourceH ?? canvasH;
+  const upScaleX = naturalWidth / refW;
+  const upScaleY = naturalHeight / refH;
 
   const faces: FaceRegion[] = preds.map((p, i) => {
     const [tx, ty] = p.topLeft;
     const [bx, by] = p.bottomRight;
+    // Add offset to translate quadrant coords back to full-canvas coords.
     const r: Rect = {
-      x: tx * upScaleX,
-      y: ty * upScaleY,
+      x: (tx + offsetX) * upScaleX,
+      y: (ty + offsetY) * upScaleY,
       width: (bx - tx) * upScaleX,
       height: (by - ty) * upScaleY,
     };
     return {
-      id: `face-b-${i}-${Math.round(r.x)}-${Math.round(r.y)}`,
+      id: `face-b-${offsetX}-${offsetY}-${i}-${Math.round(r.x)}-${Math.round(r.y)}`,
       kind: "face",
       blurred: false,
       ...r,
     };
   });
 
-  return nms(faces);
+  return faces;
 }
