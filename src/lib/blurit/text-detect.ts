@@ -69,8 +69,8 @@ async function loadWorker(): Promise<TesseractWorker | null> {
         errorHandler: (e: unknown) =>
           console.error("[BlurIt tesseract err]", e),
       })) as unknown as TesseractWorker;
-      // PSM 11 = SPARSE_TEXT: find text anywhere in the image without assuming
-      // a document layout. Best for photos with scattered signs/watermarks.
+      // PSM 11 = SPARSE_TEXT: find text anywhere. Best for photos with
+      // scattered signs/watermarks. PSM 3 (auto) finds nothing on photos.
       await worker.setParameters({ tessedit_pageseg_mode: "11" });
       return worker;
     })();
@@ -110,8 +110,9 @@ export async function detectText(
   if (!ctx) return [];
   ctx.drawImage(bitmap, 0, 0, dw, dh);
 
-  // Grayscale + contrast stretch improves OCR on photos.
-  preprocessForOcr(ctx, dw, dh);
+  // Grayscale + contrast stretch can hurt OCR on already-clear text. Disabled
+  // by default — Tesseract handles color photos fine. Enable only if needed.
+  // preprocessForOcr(ctx, dw, dh);
 
   onProgress?.(0.2);
   const blob = await new Promise<Blob | null>((res) =>
@@ -134,15 +135,21 @@ export async function detectText(
   // v7 nests words under blocks[].paragraphs[].lines[].words.
   const nestedWords: TesseractWord[] = [];
   for (const block of data?.blocks ?? []) {
-    for (const paragraph of block?.paragraphs ?? []) {
+    // v7 may put lines directly on block (no paragraphs level)
+    const blockAny = block as unknown as { lines?: TesseractLine[]; paragraphs?: TesseractParagraph[] };
+    const lines = blockAny.lines ?? [];
+    for (const paragraph of block?.paragraphs ?? blockAny.paragraphs ?? []) {
       for (const line of paragraph?.lines ?? []) {
-        nestedWords.push(...(line.words ?? []));
+        lines.push(line);
       }
+    }
+    for (const line of lines) {
+      nestedWords.push(...(line.words ?? []));
     }
   }
   const allWords = (data?.words?.length ? data.words : nestedWords) ?? [];
   const words = allWords.filter(
-    (w) => w.confidence >= 55 && isLikelyRealText(w.text),
+    (w) => w.confidence >= 40 && isLikelyRealText(w.text),
   );
 
   if (words.length === 0) return [];
@@ -215,8 +222,8 @@ function mergeWords(
     }
   }
 
-  const minArea = (dw * dh) * 0.0004;
-  const maxArea = (dw * dh) * 0.5;
+  const minArea = (dw * dh) * 0.0001;
+  const maxArea = (dw * dh) * 0.6;
   return groups
     .filter((g) => {
       const area = (g.x1 - g.x0) * (g.y1 - g.y0);
@@ -292,12 +299,12 @@ function preprocessForOcr(
 
 function isLikelyRealText(text: string): boolean {
   const t = text.trim();
-  // Require at least 3 chars to filter 1-2 letter noise fragments.
-  if (t.length < 3) return false;
+  // Require at least 2 chars to filter 1-char noise.
+  if (t.length < 2) return false;
   const alnum = (t.match(/[a-zA-Z0-9]/g) ?? []).length;
   const nonSpace = t.replace(/\s/g, "").length;
   if (nonSpace === 0) return false;
-  return alnum >= 3 && alnum / nonSpace > 0.5;
+  return alnum >= 2 && alnum / nonSpace > 0.4;
 }
 
 export async function terminateTextWorker(): Promise<void> {

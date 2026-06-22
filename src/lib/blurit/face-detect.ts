@@ -31,14 +31,22 @@ export async function detectFaces(
   naturalWidth: number,
   naturalHeight: number,
 ): Promise<DetectionResult> {
-  // 1600px canvas — large enough to keep small faces (crowds) detectable.
-  // BlazeFace downsamples internally to 128px, so bigger input = relatively
-  // bigger faces for the model.
-  const MAX = 1600;
-  const scale =
-    Math.max(naturalWidth, naturalHeight) > MAX
-      ? MAX / Math.max(naturalWidth, naturalHeight)
-      : 1;
+  // Upscale small images to 1000px so small faces are detectable by BlazeFace
+  // (which downsamples to 128px). For large images, downscale to 1600px.
+  const longest = Math.max(naturalWidth, naturalHeight);
+  let MAX: number;
+  let scale: number;
+  if (longest < 1000) {
+    // Upscale small images.
+    MAX = 1000;
+    scale = MAX / longest;
+  } else if (longest > 1600) {
+    // Downscale large images.
+    MAX = 1600;
+    scale = MAX / longest;
+  } else {
+    scale = 1;
+  }
   const dw = Math.max(1, Math.round(naturalWidth * scale));
   const dh = Math.max(1, Math.round(naturalHeight * scale));
 
@@ -96,9 +104,9 @@ export async function detectFaces(
       naturalWidth,
       naturalHeight,
     );
-    // Run on quadrants only if the image is large enough to benefit.
+    // Run on quadrants for multi-scale detection (catches small faces).
     const quadFaces: FaceRegion[] = [];
-    if (dw >= 600 && dh >= 600) {
+    if (dw >= 400 && dh >= 400) {
       const hw = Math.floor(dw / 2);
       const hh = Math.floor(dh / 2);
       const overlap = 0.15; // 15% overlap between quadrants
