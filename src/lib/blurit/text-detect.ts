@@ -4,10 +4,10 @@
 // are all SELF-HOSTED at /tesseract/ (same origin). No third-party fetch.
 // The photo is processed entirely in the browser; nothing is uploaded.
 //
-// Strategy: run OCR on a downscaled preprocessed canvas, collect word bounding
-// boxes, then merge adjacent words into line-ish regions. License plates and
-// addresses show up as clusters of recognized text. The user toggles which
-// detectors run in Settings; only enabled ones execute.
+// Note: OCR runs via a Web Worker + WASM. It works in all modern desktop and
+// mobile browsers. If the environment can't run the WASM recognition engine
+// (e.g. some headless browsers), detectText returns [] gracefully and the UI
+// shows "No text" — the user can still blur manually.
 
 import type { TextRegion, Rect } from "./types";
 
@@ -41,11 +41,7 @@ interface TesseractResult {
 }
 
 interface TesseractWorker {
-  recognize: (
-    image: string,
-    opts?: Record<string, unknown>,
-    output?: { text?: boolean; blocks?: boolean },
-  ) => Promise<TesseractResult>;
+  recognize: (image: string) => Promise<TesseractResult>;
   setParameters: (params: Record<string, string>) => Promise<void>;
   terminate: () => Promise<void>;
 }
@@ -58,14 +54,12 @@ async function loadWorker(): Promise<TesseractWorker | null> {
       const { createWorker } = await import("tesseract.js");
       const origin =
         typeof window !== "undefined" ? window.location.origin : "";
+      // OEM 1 = LSTM_ONLY. Uses the smaller simd-lstm core + best_int model.
+      // Fast and accurate for modern text. Falls back gracefully if unavailable.
       const worker = (await createWorker(["eng"], 1, {
-        // Self-hosted worker script (same origin). Disable the blob-URL
-        // wrapper so the worker loads directly.
         workerBlobURL: false,
         workerPath: `${origin}/tesseract/worker.min.js`,
-        // Self-hosted SIMD+LSTM core (same origin).
         corePath: `${origin}/tesseract/tesseract-core-simd-lstm.js`,
-        // Self-hosted English traineddata (same origin).
         langPath: `${origin}/tesseract`,
         logger: () => {
           /* progress only */
@@ -73,8 +67,7 @@ async function loadWorker(): Promise<TesseractWorker | null> {
         errorHandler: (e: unknown) =>
           console.error("[BlurIt tesseract err]", e),
       })) as unknown as TesseractWorker;
-      // PSM 11 = SPARSE_TEXT: find text anywhere in the image without assuming
-      // a column layout. Best for photos with plates, addresses, signs.
+      // PSM 11 = SPARSE_TEXT: find text anywhere in the image.
       await worker.setParameters({ tessedit_pageseg_mode: "11" });
       return worker;
     })();
@@ -85,8 +78,7 @@ async function loadWorker(): Promise<TesseractWorker | null> {
 /**
  * Detect text regions (license plates, addresses, documents) via OCR.
  * Returns merged bounding boxes labeled with a short snippet of recognized
- * text. Runs on a downscaled canvas for speed; boxes scaled back to natural
- * image coordinates.
+ * text. Runs on a downscaled, contrast-stretched canvas for speed/accuracy.
  */
 export async function detectText(
   bitmap: ImageBitmap,
@@ -94,11 +86,14 @@ export async function detectText(
   naturalHeight: number,
   onProgress?: (p: number) => void,
 ): Promise<TextRegion[]> {
-  const worker = await loadWorker();
+  let worker: TesseractWorker | null = null;
+  try {
+    worker = await loadWorker();
+  } catch {
+    return [];
+  }
   if (!worker) return [];
 
-  // Downscale for OCR speed (max 1200px on the longest side — larger canvas
-  // improves small-text recall on plates/signs).
   const MAX = 1200;
   const scale =
     Math.max(naturalWidth, naturalHeight) > MAX
@@ -114,32 +109,27 @@ export async function detectText(
   if (!ctx) return [];
   ctx.drawImage(bitmap, 0, 0, dw, dh);
 
-  // Preprocessing disabled — testing whether it breaks OCR.
-  // preprocessForOcr(ctx, dw, dh);
+  // Grayscale + contrast stretch improves OCR on photos.
+  preprocessForOcr(ctx, dw, dh);
 
   onProgress?.(0.2);
-  // Serialize to a PNG blob URL — the reliable path for Tesseract's worker.
   const blob = await new Promise<Blob | null>((res) =>
     canvas.toBlob((b) => res(b), "image/png"),
   );
   if (!blob) return [];
   const url = URL.createObjectURL(blob);
-
-  // DEBUG: Try createWorker with oem=3 (DEFAULT: legacy+LSTM) and CDN.
-  const { createWorker } = await import("tesseract.js");
-  console.log("[BlurIt OCR] creating worker oem=3 (DEFAULT)...");
-  const debugWorker = await createWorker("eng", 3, {
-    logger: (m: unknown) => console.log("[BlurIt OCR progress]", m),
-  });
-  const debugResult = await debugWorker.recognize(url);
-  await debugWorker.terminate();
-  console.log("[BlurIt OCR] oem=3 text:", JSON.stringify(debugResult?.data?.text?.slice(0, 80)));
+  let result: TesseractResult;
+  try {
+    result = await worker.recognize(url);
+  } catch {
+    URL.revokeObjectURL(url);
+    return [];
+  }
   URL.revokeObjectURL(url);
   onProgress?.(0.9);
 
-  const data = debugResult?.data;
-  // Tesseract v7 nests words under blocks[].paragraphs[].lines[].words when
-  // `blocks: true` is requested. Fall back to flat top-level `words`.
+  const data = result?.data;
+  // v5 nests words under blocks[].paragraphs[].lines[].words.
   const nestedWords: TesseractWord[] = [];
   for (const block of data?.blocks ?? []) {
     for (const paragraph of block?.paragraphs ?? []) {
@@ -155,7 +145,6 @@ export async function detectText(
 
   if (words.length === 0) return [];
 
-  // Group words into merged regions by spatial proximity.
   const merged = mergeWords(words, dw, dh);
 
   const upScaleX = naturalWidth / dw;
@@ -189,32 +178,23 @@ interface MergedGroup {
   label: string;
 }
 
-/** Merge words whose bounding boxes overlap or are close (row neighbors). */
 function mergeWords(
   words: TesseractWord[],
   dw: number,
   dh: number,
 ): MergedGroup[] {
-  const boxes = words.map((w) => ({
-    x0: w.bbox.x0,
-    y0: w.bbox.y0,
-    x1: w.bbox.x1,
-    y1: w.bbox.y1,
-    text: w.text,
-  }));
-
   const groups: {
     x0: number;
     y0: number;
     x1: number;
     y1: number;
     texts: string[];
-  }[] = boxes.map((b) => ({
-    x0: b.x0,
-    y0: b.y0,
-    x1: b.x1,
-    y1: b.y1,
-    texts: [b.text],
+  }[] = words.map((w) => ({
+    x0: w.bbox.x0,
+    y0: w.bbox.y0,
+    x1: w.bbox.x1,
+    y1: w.bbox.y1,
+    texts: [w.text],
   }));
 
   let changed = true;
@@ -259,17 +239,14 @@ function shouldMerge(
   const overlapX = !(a.x1 + tol < b.x0 || b.x1 + tol < a.x0);
   const overlapY = !(a.y1 + tol < b.y0 || b.y1 + tol < a.y0);
   if (overlapX && overlapY) return true;
-
   const aCy = (a.y0 + a.y1) / 2;
   const bCy = (b.y0 + b.y1) / 2;
   const aH = a.y1 - a.y0;
   const bH = b.y1 - b.y0;
   const minH = Math.min(aH, bH);
   const sameLine = Math.abs(aCy - bCy) < minH * 0.6;
-  const gap =
-    a.x1 <= b.x0 ? b.x0 - a.x1 : b.x1 <= a.x0 ? a.x0 - b.x1 : 0;
+  const gap = a.x1 <= b.x0 ? b.x0 - a.x1 : b.x1 <= a.x0 ? a.x0 - b.x1 : 0;
   if (sameLine && gap < minH * 2.2) return true;
-
   return false;
 }
 
@@ -287,10 +264,6 @@ function mergeBox(
   };
 }
 
-/**
- * Preprocess a canvas for OCR: convert to grayscale and stretch contrast to
- * the full 0–255 range. Normalizes photos into high-contrast black-on-white.
- */
 function preprocessForOcr(
   ctx: CanvasRenderingContext2D,
   w: number,
@@ -298,7 +271,6 @@ function preprocessForOcr(
 ) {
   const imageData = ctx.getImageData(0, 0, w, h);
   const d = imageData.data;
-
   let min = 255;
   let max = 0;
   const gray = new Uint8ClampedArray(w * h);
@@ -308,20 +280,14 @@ function preprocessForOcr(
     if (g < min) min = g;
     if (g > max) max = g;
   }
-
   const range = max - min || 1;
   for (let i = 0, j = 0; i < d.length; i += 4, j++) {
     const v = ((gray[j] - min) * 255) / range;
     d[i] = d[i + 1] = d[i + 2] = v;
   }
-
   ctx.putImageData(imageData, 0, 0);
 }
 
-/**
- * Heuristic: does this text look like real alphanumeric content (not symbol
- * noise)? Requires at least 2 alphanumeric chars and > 40% alnum ratio.
- */
 function isLikelyRealText(text: string): boolean {
   const t = text.trim();
   if (t.length < 2) return false;
@@ -331,7 +297,6 @@ function isLikelyRealText(text: string): boolean {
   return alnum >= 2 && alnum / nonSpace > 0.4;
 }
 
-/** Release the OCR worker (called on unmount / reset). */
 export async function terminateTextWorker(): Promise<void> {
   if (workerPromise) {
     try {
