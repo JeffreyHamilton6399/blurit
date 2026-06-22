@@ -4,6 +4,10 @@
 //    served same-origin from /public/models so no third-party fetch)
 // -> manual only (draw blur boxes by hand).
 //
+// Improvements: lower score threshold (0.4), larger detection canvas (800px
+// longest side for better small-face recall), and non-maximum suppression to
+// remove overlapping duplicate boxes from either engine.
+//
 // Privacy: the BlazeFace model weights load from the SAME ORIGIN (/models/).
 // Your photo is NEVER sent anywhere — detection runs locally in the browser.
 
@@ -23,15 +27,17 @@ interface NativeDetectedFace {
 
 /**
  * Detect faces in an image. Detection runs on a downscaled canvas for speed,
- * then boxes are scaled back up to natural image coordinates.
+ * then boxes are scaled back up to natural image coordinates. Overlapping
+ * duplicates are removed via non-maximum suppression.
  */
 export async function detectFaces(
   bitmap: ImageBitmap,
   naturalWidth: number,
   naturalHeight: number,
 ): Promise<DetectionResult> {
-  // Downscaled detection canvas (also reused for BlazeFace).
-  const MAX = 640;
+  // Larger detection canvas (800px) improves small-face recall without a
+  // meaningful speed cost on modern devices.
+  const MAX = 800;
   const scale =
     Math.max(naturalWidth, naturalHeight) > MAX
       ? MAX / Math.max(naturalWidth, naturalHeight)
@@ -62,7 +68,7 @@ export async function detectFaces(
           };
         }
       ).FaceDetector;
-      const detector = new FD({ fastMode: true, maxDetectedFaces: 50 });
+      const detector = new FD({ fastMode: false, maxDetectedFaces: 50 });
       const detected = await detector.detect(detectCanvas);
       try {
         detector.release?.();
@@ -70,15 +76,12 @@ export async function detectFaces(
         /* ignore */
       }
       if (detected.length > 0) {
-        return buildResult(
+        const faces = nms(
           toFaces(detected, dw, dh, naturalWidth, naturalHeight),
-          true,
-          "native",
         );
+        return buildResult(faces, true, "native");
       }
-      // zero faces from native — still report availability, try blazeface too
-      // for robustness, but prefer the native answer.
-      return buildResult([], true, "native");
+      // zero faces from native — try blazeface for robustness.
     } catch {
       // fall through to blazeface
     }
@@ -146,6 +149,39 @@ function toFaces(
   });
 }
 
+/**
+ * Non-maximum suppression: remove boxes that overlap a higher-scoring box by
+ * more than 30% IoU. Faces are kept in detection order (earlier = preferred).
+ */
+function nms(faces: FaceRegion[], iouThreshold = 0.3): FaceRegion[] {
+  const kept: FaceRegion[] = [];
+  const suppressed = new Set<string>();
+  for (let i = 0; i < faces.length; i++) {
+    if (suppressed.has(faces[i].id)) continue;
+    kept.push(faces[i]);
+    for (let j = i + 1; j < faces.length; j++) {
+      if (suppressed.has(faces[j].id)) continue;
+      if (iou(faces[i], faces[j]) > iouThreshold) {
+        suppressed.add(faces[j].id);
+      }
+    }
+  }
+  return kept;
+}
+
+function iou(a: Rect, b: Rect): number {
+  const x0 = Math.max(a.x, b.x);
+  const y0 = Math.max(a.y, b.y);
+  const x1 = Math.min(a.x + a.width, b.x + b.width);
+  const y1 = Math.min(a.y + a.height, b.y + b.height);
+  const interW = Math.max(0, x1 - x0);
+  const interH = Math.max(0, y1 - y0);
+  const inter = interW * interH;
+  const union =
+    a.width * a.height + b.width * b.height - inter;
+  return union > 0 ? inter / union : 0;
+}
+
 // ---- BlazeFace (lazy-loaded) -------------------------------------------
 
 interface BlazeFacePrediction {
@@ -180,7 +216,9 @@ async function loadBlazeFace(): Promise<BlazeFaceModel | null> {
       const blazeface = await import("@tensorflow-models/blazeface");
       const model = await blazeface.load({
         maxFaces: 50,
-        scoreThreshold: 0.5,
+        // Lower threshold (0.4) catches more faces, especially partially
+        // occluded or rotated ones. NMS removes the resulting duplicates.
+        scoreThreshold: 0.4,
         // Self-hosted model — same origin, no third-party fetch.
         modelUrl: "/models/blazeface/model.json",
       });
@@ -221,5 +259,5 @@ async function detectWithBlazeFace(
     };
   });
 
-  return faces;
+  return nms(faces);
 }

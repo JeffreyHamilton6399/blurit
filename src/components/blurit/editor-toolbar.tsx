@@ -13,13 +13,10 @@ import {
   Loader2,
   Sparkles,
   Circle,
+  ChevronRight,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
-import {
-  ToggleGroup,
-  ToggleGroupItem,
-} from "@/components/ui/toggle-group";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
 import type {
   BlurIntensity,
@@ -52,62 +49,88 @@ interface EditorToolbarProps {
   downloading: boolean;
 }
 
-/** A segmented-control "pod": muted rounded container, active item raised. */
-function Group({
-  label,
-  value,
-  onValueChange,
-  children,
-}: {
+interface CycleOption<T extends string> {
+  value: T;
   label: string;
-  value: string;
-  onValueChange: (v: string) => void;
-  children: React.ReactNode;
+  icon: React.ReactNode;
+}
+
+/**
+ * A single button that cycles through its options on click. Shows the current
+ * option's icon + label, plus a row of dots indicating position in the cycle.
+ */
+function CycleButton<T extends string>({
+  options,
+  value,
+  onCycle,
+  ariaLabel,
+}: {
+  options: CycleOption<T>[];
+  value: T;
+  onCycle: (next: T) => void;
+  ariaLabel: string;
 }) {
+  const currentIndex = Math.max(
+    0,
+    options.findIndex((o) => o.value === value),
+  );
+  const current = options[currentIndex];
+  const nextIndex = (currentIndex + 1) % options.length;
+
+  const handleClick = () => onCycle(options[nextIndex].value);
+
   return (
-    <div className="flex flex-col gap-1">
-      <span className="px-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground/70">
-        {label}
-      </span>
-      <ToggleGroup
-        type="single"
-        value={value}
-        onValueChange={onValueChange}
-        size="sm"
-        variant="outline"
-        className="gap-0.5 rounded-lg border-none bg-muted p-0.5 shadow-none"
-      >
-        {children}
-      </ToggleGroup>
-    </div>
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <button
+          type="button"
+          onClick={handleClick}
+          aria-label={`${ariaLabel}: ${current.label}. Click for ${options[nextIndex].label}.`}
+          className="group flex h-9 items-center gap-2 rounded-lg border border-border bg-background px-3 text-sm font-medium shadow-sm transition-colors hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 focus-visible:ring-offset-1"
+        >
+          <span className="text-foreground/80">{current.icon}</span>
+          <span className="min-w-[2.5rem] text-left">{current.label}</span>
+          {/* dot indicators */}
+          <span className="flex items-center gap-0.5 pl-0.5">
+            {options.map((o, i) => (
+              <span
+                key={o.value}
+                className={cn(
+                  "size-1 rounded-full transition-colors",
+                  i === currentIndex
+                    ? "bg-emerald-500"
+                    : "bg-muted-foreground/30",
+                )}
+              />
+            ))}
+          </span>
+          <ChevronRight className="size-3 text-muted-foreground/50 transition-transform group-hover:translate-x-0.5" />
+        </button>
+      </TooltipTrigger>
+      <TooltipContent>
+        {ariaLabel} — {current.label} (click for {options[nextIndex].label})
+      </TooltipContent>
+    </Tooltip>
   );
 }
 
-/** Pod item: flat in the muted container, raised white when active. */
-function Item({
-  value,
-  ariaLabel,
-  children,
-}: {
-  value: string;
-  ariaLabel: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <ToggleGroupItem
-      value={value}
-      aria-label={ariaLabel}
-      variant="outline"
-      className={cn(
-        "h-7 min-w-7 gap-1 rounded-md border-none bg-transparent px-2 text-xs font-medium shadow-none",
-        "hover:bg-background/60",
-        "data-[state=on]:bg-background data-[state=on]:text-foreground data-[state=on]:shadow-sm",
-      )}
-    >
-      {children}
-    </ToggleGroupItem>
-  );
-}
+const TOOL_OPTIONS: CycleOption<Tool>[] = [
+  { value: "select", label: "Tap", icon: <MousePointerClick className="size-4" /> },
+  { value: "brush", label: "Brush", icon: <Brush className="size-4" /> },
+  { value: "erase", label: "Erase", icon: <Eraser className="size-4" /> },
+];
+
+const STYLE_OPTIONS: CycleOption<BlurType>[] = [
+  { value: "pixelate", label: "Pixelate", icon: <Grid2x2 className="size-4" /> },
+  { value: "gaussian", label: "Blur", icon: <CircleSlash className="size-4" /> },
+  { value: "black", label: "Black", icon: <Square className="size-4" /> },
+];
+
+const STRENGTH_OPTIONS: CycleOption<BlurIntensity>[] = [
+  { value: "light", label: "Light", icon: <span className="text-xs">●</span> },
+  { value: "medium", label: "Med", icon: <span className="text-xs">●●</span> },
+  { value: "heavy", label: "Heavy", icon: <span className="text-xs">●●●</span> },
+];
 
 export function EditorToolbar(props: EditorToolbarProps) {
   const {
@@ -134,79 +157,57 @@ export function EditorToolbar(props: EditorToolbarProps) {
     downloading,
   } = props;
 
-  const setToolSafe = (v: string) => v && setTool(v as Tool);
-  const setBlurTypeSafe = (v: string) => v && setBlurType(v as BlurType);
-  const setIntensitySafe = (v: string) => v && setIntensity(v as BlurIntensity);
-  const setBrushShapeSafe = (v: string) =>
-    v && setBrushShape(v as RegionShape);
-
   return (
     <div className="flex flex-col gap-2">
-      <div className="flex flex-wrap items-end gap-3">
-        {/* Tool */}
-        <Group label="Tool" value={tool} onValueChange={setToolSafe}>
-          <Item value="select" ariaLabel="Select / tap regions">
-            <MousePointerClick className="size-4" />
-            <span className="hidden sm:inline">Tap</span>
-          </Item>
-          <Item value="brush" ariaLabel="Draw blur box">
-            <Brush className="size-4" />
-            <span className="hidden sm:inline">Brush</span>
-          </Item>
-          <Item value="erase" ariaLabel="Erase blur">
-            <Eraser className="size-4" />
-            <span className="hidden sm:inline">Erase</span>
-          </Item>
-        </Group>
-
-        {/* Brush shape — only when brushing */}
-        {tool === "brush" && (
-          <Group
-            label="Shape"
-            value={brushShape}
-            onValueChange={setBrushShapeSafe}
-          >
-            <Item value="rect" ariaLabel="Rectangle brush">
-              <Square className="size-4" />
-            </Item>
-            <Item value="ellipse" ariaLabel="Oval brush">
-              <Circle className="size-4" />
-            </Item>
-          </Group>
-        )}
-
-        {/* Blur type */}
-        <Group label="Style" value={blurType} onValueChange={setBlurTypeSafe}>
-          <Item value="pixelate" ariaLabel="Pixelate">
-            <Grid2x2 className="size-4" />
-            <span className="hidden md:inline">Pixelate</span>
-          </Item>
-          <Item value="gaussian" ariaLabel="Gaussian blur">
-            <CircleSlash className="size-4" />
-            <span className="hidden md:inline">Blur</span>
-          </Item>
-          <Item value="black" ariaLabel="Black box">
-            <Square className="size-4" />
-            <span className="hidden md:inline">Black</span>
-          </Item>
-        </Group>
-
-        {/* Intensity */}
-        <Group
-          label="Strength"
+      <div className="flex flex-wrap items-center gap-2">
+        {/* 3 cycle buttons — the entire control surface */}
+        <CycleButton
+          options={TOOL_OPTIONS}
+          value={tool}
+          onCycle={setTool}
+          ariaLabel="Tool"
+        />
+        <CycleButton
+          options={STYLE_OPTIONS}
+          value={blurType}
+          onCycle={setBlurType}
+          ariaLabel="Blur style"
+        />
+        <CycleButton
+          options={STRENGTH_OPTIONS}
           value={intensity}
-          onValueChange={setIntensitySafe}
-        >
-          <Item value="light" ariaLabel="Light intensity">
-            Light
-          </Item>
-          <Item value="medium" ariaLabel="Medium intensity">
-            Med
-          </Item>
-          <Item value="heavy" ariaLabel="Heavy intensity">
-            Heavy
-          </Item>
-        </Group>
+          onCycle={setIntensity}
+          ariaLabel="Strength"
+        />
+
+        {/* Brush shape — tiny contextual toggle, only when brushing */}
+        {tool === "brush" && (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                type="button"
+                onClick={() =>
+                  setBrushShape(brushShape === "rect" ? "ellipse" : "rect")
+                }
+                aria-label={`Brush shape: ${brushShape === "rect" ? "rectangle" : "oval"}. Click to switch.`}
+                className="flex h-9 items-center gap-1.5 rounded-lg border border-border bg-background px-2.5 text-sm font-medium shadow-sm transition-colors hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
+              >
+                {brushShape === "rect" ? (
+                  <Square className="size-4" />
+                ) : (
+                  <Circle className="size-4" />
+                )}
+                <span className="text-xs">
+                  {brushShape === "rect" ? "Rect" : "Oval"}
+                </span>
+              </button>
+            </TooltipTrigger>
+            <TooltipContent>
+              Shape: {brushShape === "rect" ? "Rectangle" : "Oval"} (click to
+              switch)
+            </TooltipContent>
+          </Tooltip>
+        )}
 
         <div className="ml-auto flex items-center gap-1.5">
           {manualCount > 0 && (
@@ -230,7 +231,7 @@ export function EditorToolbar(props: EditorToolbarProps) {
               <Button
                 variant="outline"
                 size="icon"
-                className="size-8"
+                className="size-9"
                 onClick={onNew}
                 aria-label="Open a new photo"
               >
@@ -243,7 +244,7 @@ export function EditorToolbar(props: EditorToolbarProps) {
             size="sm"
             onClick={onDownload}
             disabled={downloading}
-            className="h-8 gap-1.5 rounded-full bg-emerald-600 text-white hover:bg-emerald-600/90"
+            className="h-9 gap-1.5 rounded-lg bg-emerald-600 text-white hover:bg-emerald-600/90"
           >
             {downloading ? (
               <Loader2 className="size-4 animate-spin" />
