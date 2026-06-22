@@ -1,15 +1,85 @@
-// Text / license-plate / document detector using Tesseract.js (OCR).
+// Text / license-plate / document detector.
+// Engine priority: native TextDetector API (Chrome/Edge, instant + accurate)
+// -> Tesseract.js v7 (all browsers, self-hosted, fallback)
 //
-// Privacy: the Tesseract worker script, WASM core, and English traineddata
-// are all SELF-HOSTED at /tesseract/ (same origin). No third-party fetch.
-// The photo is processed entirely in the browser; nothing is uploaded.
+// The native TextDetector (Experimental Shape Detection API) is the same
+// class of API as FaceDetector — it runs natively in Chromium browsers and
+// is instant + accurate. Tesseract is the fallback for Safari/Firefox.
 //
-// Note: OCR runs via a Web Worker + WASM. It works in all modern desktop and
-// mobile browsers. If the environment can't run the WASM recognition engine
-// (e.g. some headless browsers), detectText returns [] gracefully and the UI
-// shows "No text" — the user can still blur manually.
+// Privacy: ALL models load from the SAME ORIGIN (/tesseract/). No third-party
+// fetch. The photo is processed entirely in the browser; nothing is uploaded.
 
 import type { TextRegion, Rect } from "./types";
+
+// ---- Native TextDetector (fast path) -----------------------------------
+
+interface NativeDetectedText {
+  boundingBox: DOMRectReadOnly;
+  rawValue?: string;
+}
+
+function isTextDetectorAvailable(): boolean {
+  return (
+    typeof window !== "undefined" &&
+    typeof (window as unknown as { TextDetector?: unknown }).TextDetector ===
+      "function"
+  );
+}
+
+async function detectWithNative(
+  canvas: HTMLCanvasElement,
+  dw: number,
+  dh: number,
+  naturalWidth: number,
+  naturalHeight: number,
+): Promise<TextRegion[] | null> {
+  if (!isTextDetectorAvailable()) return null;
+  try {
+    const TD = (
+      window as unknown as {
+        TextDetector: new () => {
+          detect: (s: CanvasImageSource) => Promise<NativeDetectedText[]>;
+          release?: () => void;
+        };
+      }
+    ).TextDetector;
+    const detector = new TD();
+    const detected = await detector.detect(canvas);
+    try {
+      detector.release?.();
+    } catch {
+      /* ignore */
+    }
+    const upScaleX = naturalWidth / dw;
+    const upScaleY = naturalHeight / dh;
+    const regions: TextRegion[] = detected
+      .filter((d) => {
+        const label = (d.rawValue ?? "").trim();
+        return label.length >= 2;
+      })
+      .map((d, i) => {
+        const b = d.boundingBox;
+        const r: Rect = {
+          x: b.left * upScaleX,
+          y: b.top * upScaleY,
+          width: b.width * upScaleX,
+          height: b.height * upScaleY,
+        };
+        return {
+          id: `text-n-${i}-${Math.round(r.x)}-${Math.round(r.y)}`,
+          kind: "text" as const,
+          label: (d.rawValue ?? "text").trim().slice(0, 24),
+          blurred: false,
+          ...r,
+        };
+      });
+    return regions;
+  } catch {
+    return null;
+  }
+}
+
+// ---- Tesseract.js v7 (fallback) ----------------------------------------
 
 interface TesseractWord {
   text: string;
@@ -69,8 +139,7 @@ async function loadWorker(): Promise<TesseractWorker | null> {
         errorHandler: (e: unknown) =>
           console.error("[BlurIt tesseract err]", e),
       })) as unknown as TesseractWorker;
-      // PSM 11 = SPARSE_TEXT: find text anywhere. Best for photos with
-      // scattered signs/watermarks. PSM 3 (auto) finds nothing on photos.
+      // PSM 11 = SPARSE_TEXT: find text anywhere in the image.
       await worker.setParameters({ tessedit_pageseg_mode: "11" });
       return worker;
     })();
@@ -78,8 +147,18 @@ async function loadWorker(): Promise<TesseractWorker | null> {
   return workerPromise;
 }
 
+function isLikelyRealText(text: string): boolean {
+  const t = text.trim();
+  if (t.length < 2) return false;
+  const alnum = (t.match(/[a-zA-Z0-9]/g) ?? []).length;
+  const nonSpace = t.replace(/\s/g, "").length;
+  if (nonSpace === 0) return false;
+  return alnum >= 2 && alnum / nonSpace > 0.4;
+}
+
 /**
- * Detect text regions (license plates, addresses, documents) via OCR.
+ * Detect text regions. Tries native TextDetector first (instant in Chrome/
+ * Edge), falls back to Tesseract.js for other browsers.
  */
 export async function detectText(
   bitmap: ImageBitmap,
@@ -87,19 +166,11 @@ export async function detectText(
   naturalHeight: number,
   onProgress?: (p: number) => void,
 ): Promise<TextRegion[]> {
-  let worker: TesseractWorker | null = null;
-  try {
-    worker = await loadWorker();
-  } catch {
-    return [];
-  }
-  if (!worker) return [];
-
-  const MAX = 1200;
-  const scale =
-    Math.max(naturalWidth, naturalHeight) > MAX
-      ? MAX / Math.max(naturalWidth, naturalHeight)
-      : 1;
+  // Detection canvas — upscale small images, downscale large ones.
+  const longest = Math.max(naturalWidth, naturalHeight);
+  let scale = 1;
+  if (longest < 1000) scale = 1000 / longest;
+  if (longest > 1600) scale = 1600 / longest;
   const dw = Math.max(1, Math.round(naturalWidth * scale));
   const dh = Math.max(1, Math.round(naturalHeight * scale));
 
@@ -110,11 +181,31 @@ export async function detectText(
   if (!ctx) return [];
   ctx.drawImage(bitmap, 0, 0, dw, dh);
 
-  // Grayscale + contrast stretch can hurt OCR on already-clear text. Disabled
-  // by default — Tesseract handles color photos fine. Enable only if needed.
-  // preprocessForOcr(ctx, dw, dh);
-
+  // 1. Native TextDetector (instant, Chrome/Edge).
   onProgress?.(0.2);
+  const nativeResult = await detectWithNative(
+    canvas,
+    dw,
+    dh,
+    naturalWidth,
+    naturalHeight,
+  );
+  if (nativeResult !== null) {
+    onProgress?.(1);
+    return nativeResult;
+  }
+
+  // 2. Tesseract.js fallback.
+  onProgress?.(0.3);
+  let worker: TesseractWorker | null = null;
+  try {
+    worker = await loadWorker();
+  } catch {
+    return [];
+  }
+  if (!worker) return [];
+
+  onProgress?.(0.4);
   const blob = await new Promise<Blob | null>((res) =>
     canvas.toBlob((b) => res(b), "image/png"),
   );
@@ -135,8 +226,10 @@ export async function detectText(
   // v7 nests words under blocks[].paragraphs[].lines[].words.
   const nestedWords: TesseractWord[] = [];
   for (const block of data?.blocks ?? []) {
-    // v7 may put lines directly on block (no paragraphs level)
-    const blockAny = block as unknown as { lines?: TesseractLine[]; paragraphs?: TesseractParagraph[] };
+    const blockAny = block as unknown as {
+      lines?: TesseractLine[];
+      paragraphs?: TesseractParagraph[];
+    };
     const lines = blockAny.lines ?? [];
     for (const paragraph of block?.paragraphs ?? blockAny.paragraphs ?? []) {
       for (const line of paragraph?.lines ?? []) {
@@ -155,7 +248,6 @@ export async function detectText(
   if (words.length === 0) return [];
 
   const merged = mergeWords(words, dw, dh);
-
   const upScaleX = naturalWidth / dw;
   const upScaleY = naturalHeight / dh;
 
@@ -167,7 +259,7 @@ export async function detectText(
       height: g.h * upScaleY,
     };
     return {
-      id: `text-${i}-${Math.round(r.x)}-${Math.round(r.y)}`,
+      id: `text-t-${i}-${Math.round(r.x)}-${Math.round(r.y)}`,
       kind: "text",
       label: g.label.slice(0, 24),
       blurred: false,
@@ -178,6 +270,8 @@ export async function detectText(
   onProgress?.(1);
   return regions;
 }
+
+// ---- Word merging (Tesseract fallback) ---------------------------------
 
 interface MergedGroup {
   x: number;
@@ -271,40 +365,6 @@ function mergeBox(
     y1: Math.max(a.y1, b.y1),
     texts: aFirst ? [...a.texts, ...b.texts] : [...b.texts, ...a.texts],
   };
-}
-
-function preprocessForOcr(
-  ctx: CanvasRenderingContext2D,
-  w: number,
-  h: number,
-) {
-  const imageData = ctx.getImageData(0, 0, w, h);
-  const d = imageData.data;
-  let min = 255;
-  let max = 0;
-  const gray = new Uint8ClampedArray(w * h);
-  for (let i = 0, j = 0; i < d.length; i += 4, j++) {
-    const g = (d[i] * 0.2126 + d[i + 1] * 0.7152 + d[i + 2] * 0.0722) | 0;
-    gray[j] = g;
-    if (g < min) min = g;
-    if (g > max) max = g;
-  }
-  const range = max - min || 1;
-  for (let i = 0, j = 0; i < d.length; i += 4, j++) {
-    const v = ((gray[j] - min) * 255) / range;
-    d[i] = d[i + 1] = d[i + 2] = v;
-  }
-  ctx.putImageData(imageData, 0, 0);
-}
-
-function isLikelyRealText(text: string): boolean {
-  const t = text.trim();
-  // Require at least 2 chars to filter 1-char noise.
-  if (t.length < 2) return false;
-  const alnum = (t.match(/[a-zA-Z0-9]/g) ?? []).length;
-  const nonSpace = t.replace(/\s/g, "").length;
-  if (nonSpace === 0) return false;
-  return alnum >= 2 && alnum / nonSpace > 0.4;
 }
 
 export async function terminateTextWorker(): Promise<void> {
