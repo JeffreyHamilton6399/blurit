@@ -1,14 +1,12 @@
 // Face detection.
 // Engine priority: native FaceDetector API (Chrome/Edge, instant)
-// -> @vladmandic/face-api SSD MobileNet V1 (all browsers, self-hosted)
+// -> SSD MobileNet V1 via face-api (loaded from CDN at runtime, model self-hosted)
 // -> manual only.
 //
-// SSD MobileNet V1 is significantly more accurate than BlazeFace — it's a
-// single-shot detector trained on faces at multiple scales, so it handles
-// small/distant/partial faces in crowd scenes much better.
-//
-// Privacy: model weights load from the SAME ORIGIN (/models/face-api/).
-// Your photo is NEVER sent anywhere — detection runs locally in the browser.
+// NOTE: The face-api library JS is loaded from a CDN at runtime (it's just
+// code, not user data). The actual face-detection MODEL weights are
+// self-hosted at /models/face-api/ (same origin). Your photo is NEVER sent
+// anywhere — detection runs locally in the browser.
 
 import type { DetectionResult, FaceRegion, Rect } from "./types";
 
@@ -29,13 +27,9 @@ export async function detectFaces(
   naturalWidth: number,
   naturalHeight: number,
 ): Promise<DetectionResult> {
-  // Use the full-resolution image (upscaled if small) for best detection.
-  // SSD MobileNet handles multi-scale internally, so we don't need quadrants.
   const longest = Math.max(naturalWidth, naturalHeight);
   let scale = 1;
-  // Upscale small images so faces are big enough.
   if (longest < 800) scale = 800 / longest;
-  // Downscale huge images to cap memory/time.
   if (longest > 2000) scale = 2000 / longest;
   const dw = Math.max(1, Math.round(naturalWidth * scale));
   const dh = Math.max(1, Math.round(naturalHeight * scale));
@@ -81,7 +75,7 @@ export async function detectFaces(
     }
   }
 
-  // 2. SSD MobileNet V1 via @vladmandic/face-api (self-hosted model).
+  // 2. SSD MobileNet V1 via face-api (CDN library, self-hosted model).
   try {
     const faces = await detectWithSsdMobilenet(
       detectCanvas,
@@ -170,25 +164,51 @@ function iou(a: Rect, b: Rect): number {
   return union > 0 ? inter / union : 0;
 }
 
-// ---- SSD MobileNet V1 (lazy-loaded) ------------------------------------
+// ---- SSD MobileNet V1 via CDN-loaded face-api --------------------------
 
 interface FaceApiDetection {
   box: { x: number; y: number; width: number; height: number };
   score: number;
 }
 
-let modelPromise: Promise<boolean | null> | null = null;
+interface FaceApiGlobal {
+  nets: {
+    ssdMobilenetv1: { loadFromUri: (url: string) => Promise<void> };
+  };
+  detectAllFaces: (
+    input: CanvasImageSource,
+    options?: unknown,
+  ) => Promise<FaceApiDetection[]>;
+  SsdMobilenetv1Options: new (opts: {
+    minConfidence?: number;
+    maxResults?: number;
+  }) => unknown;
+}
 
-async function loadModel(): Promise<boolean | null> {
-  if (!modelPromise) {
-    modelPromise = (async () => {
-      const faceapi = await import("@vladmandic/face-api");
-      // Self-hosted SSD MobileNet V1 model.
-      await faceapi.nets.ssdMobilenetv1.loadFromUri("/models/face-api");
-      return true;
+let faceApiPromise: Promise<FaceApiGlobal | null> | null = null;
+
+async function loadFaceApi(): Promise<FaceApiGlobal | null> {
+  if (faceApiPromise) return faceApiPromise;
+  faceApiPromise = (async () => {
+    // Load face-api library from CDN (code only, not user data).
+    await new Promise<void>((resolve, reject) => {
+      if ((window as unknown as { faceapi?: unknown }).faceapi) {
+        resolve();
+        return;
+      }
+      const script = document.createElement("script");
+      script.src =
+        "https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.15/dist/face-api.js";
+      script.onload = () => resolve();
+      script.onerror = () => reject(new Error("face-api CDN load failed"));
+      document.head.appendChild(script);
     })();
-  }
-  return modelPromise;
+    const faceapi = (window as unknown as { faceapi: FaceApiGlobal }).faceapi;
+    // Self-hosted model weights (same origin).
+    await faceapi.nets.ssdMobilenetv1.loadFromUri("/models/face-api");
+    return faceapi;
+  })();
+  return faceApiPromise;
 }
 
 async function detectWithSsdMobilenet(
@@ -198,11 +218,9 @@ async function detectWithSsdMobilenet(
   naturalWidth: number,
   naturalHeight: number,
 ): Promise<FaceRegion[]> {
-  const ready = await loadModel();
-  if (!ready) return [];
+  const faceapi = await loadFaceApi();
+  if (!faceapi) return [];
 
-  const faceapi = await import("@vladmandic/face-api");
-  // Low minScore (0.15) to catch small/distant faces. NMS removes duplicates.
   const detections: FaceApiDetection[] = await faceapi.detectAllFaces(
     canvas,
     new faceapi.SsdMobilenetv1Options({ minConfidence: 0.15, maxResults: 100 }),

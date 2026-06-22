@@ -120,15 +120,46 @@ interface TesseractWorker {
   terminate: () => Promise<void>;
 }
 
+interface TesseractCdn {
+  createWorker: (
+    langs: string[],
+    oem: number,
+    options: Record<string, unknown>,
+  ) => Promise<TesseractWorker>;
+}
+
+let tesseractCdnPromise: Promise<TesseractCdn | null> | null = null;
+
+async function loadTesseractCdn(): Promise<TesseractCdn | null> {
+  if (tesseractCdnPromise) return tesseractCdnPromise;
+  tesseractCdnPromise = (async () => {
+    await new Promise<void>((resolve, reject) => {
+      if ((window as unknown as { Tesseract?: unknown }).Tesseract) {
+        resolve();
+        return;
+      }
+      const script = document.createElement("script");
+      script.src = "https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js";
+      script.onload = () => resolve();
+      script.onerror = () => reject(new Error("tesseract CDN load failed"));
+      document.head.appendChild(script);
+    })();
+    return (window as unknown as { Tesseract: TesseractCdn }).Tesseract;
+  })();
+  return tesseractCdnPromise;
+}
+
 let workerPromise: Promise<TesseractWorker | null> | null = null;
 
 async function loadWorker(): Promise<TesseractWorker | null> {
   if (!workerPromise) {
     workerPromise = (async () => {
-      const { createWorker } = await import("tesseract.js");
+      // Load tesseract.js from CDN (code only, not user data). Model weights
+      // stay self-hosted at /tesseract/. This keeps the bundle light.
+      const Tesseract = await loadTesseractCdn();
       const origin =
         typeof window !== "undefined" ? window.location.origin : "";
-      const worker = (await createWorker(["eng"], 1, {
+      const worker = (await Tesseract.createWorker(["eng"], 1, {
         workerBlobURL: false,
         workerPath: `${origin}/tesseract/worker.min.js`,
         corePath: `${origin}/tesseract/tesseract-core-simd-lstm.js`,
