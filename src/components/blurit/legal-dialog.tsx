@@ -73,9 +73,11 @@ function PrivacyBody() {
         retain a copy after you leave or open a new photo.
       </p>
       <p className="text-xs">
-        Face detection uses your browser&apos;s built-in FaceDetector API where
-        available. It runs locally on your device. No face data ever leaves your
-        browser.
+        Face detection runs entirely on your device. On Chrome and Edge it uses
+        your browser&apos;s built-in FaceDetector. On other browsers it loads a
+        small face-detection model (weights only, served from this site&apos;s
+        own origin — no third-party fetch) and runs it locally. Your photo is
+        never sent anywhere.
       </p>
     </>
   );

@@ -10,6 +10,7 @@ import type {
   LoadedImage,
   ManualRegion,
   Rect,
+  RegionShape,
   Tool,
 } from "@/lib/blurit/types";
 import { FaceBadge } from "./face-badge";
@@ -21,8 +22,9 @@ interface PhotoCanvasProps {
   blurType: BlurType;
   intensity: BlurIntensity;
   tool: Tool;
+  brushShape: RegionShape;
   onToggleFace: (id: string) => void;
-  onAddManual: (region: Rect) => void;
+  onAddManual: (region: Rect, shape: RegionShape) => void;
   onRemoveManual: (id: string) => void;
   onUnblurFace: (id: string) => void;
 }
@@ -43,6 +45,7 @@ export function PhotoCanvas({
   blurType,
   intensity,
   tool,
+  brushShape,
   onToggleFace,
   onAddManual,
   onRemoveManual,
@@ -69,9 +72,7 @@ export function PhotoCanvas({
   }, [image.naturalWidth, image.naturalHeight]);
 
   // Measure the canvas's displayed box (relative to root) so overlays can be
-  // positioned exactly over the rendered image. The canvas is a replaced
-  // element sized by max-w/max-h against the definite-height root, so it may
-  // be letterboxed inside the root.
+  // positioned exactly over the rendered image.
   const measure = React.useCallback(() => {
     const root = rootRef.current;
     const canvas = canvasRef.current;
@@ -99,7 +100,6 @@ export function PhotoCanvas({
     };
   }, [measure]);
 
-  // Re-measure when the working size changes (new image).
   React.useEffect(() => {
     measure();
   }, [workW, workH, measure]);
@@ -123,6 +123,7 @@ export function PhotoCanvas({
         },
         blurred: f.blurred,
         isFace: true,
+        shape: "ellipse" as RegionShape,
       })),
       ...manualRegions.map((m) => ({
         region: {
@@ -133,6 +134,7 @@ export function PhotoCanvas({
         },
         blurred: true,
         isFace: false,
+        shape: m.shape,
       })),
     ];
 
@@ -174,24 +176,19 @@ export function PhotoCanvas({
     (pt: Rect) => {
       for (let i = manualRegions.length - 1; i >= 0; i--) {
         const r = manualRegions[i];
-        if (
-          pt.x >= r.x &&
-          pt.x <= r.x + r.width &&
-          pt.y >= r.y &&
-          pt.y <= r.y + r.height
-        ) {
-          return { type: "manual" as const, id: r.id };
-        }
+        const inside =
+          r.shape === "ellipse"
+            ? pointInEllipse(pt, r)
+            : pt.x >= r.x &&
+              pt.x <= r.x + r.width &&
+              pt.y >= r.y &&
+              pt.y <= r.y + r.height;
+        if (inside) return { type: "manual" as const, id: r.id };
       }
       for (let i = faces.length - 1; i >= 0; i--) {
         if (!faces[i].blurred) continue;
         const sq = faceToSquareRegion(faces[i]);
-        const cx = sq.x + sq.width / 2;
-        const cy = sq.y + sq.height / 2;
-        const radius = sq.width / 2;
-        const dx = pt.x - cx;
-        const dy = pt.y - cy;
-        if (dx * dx + dy * dy <= radius * radius) {
+        if (pointInEllipse(pt, sq)) {
           return { type: "face" as const, id: faces[i].id };
         }
       }
@@ -243,7 +240,7 @@ export function PhotoCanvas({
     dragRef.current = null;
     setDraft(null);
     if (d && d.width > 8 && d.height > 8) {
-      onAddManual(d);
+      onAddManual(d, brushShape);
     }
   };
 
@@ -296,7 +293,10 @@ export function PhotoCanvas({
             manualRegions.map((r) => (
               <div
                 key={`outline-${r.id}`}
-                className="pointer-events-none absolute rounded-sm border-2 border-dashed border-rose-500"
+                className={cn(
+                  "pointer-events-none absolute border-2 border-dashed border-rose-500",
+                  r.shape === "ellipse" ? "rounded-full" : "rounded-sm",
+                )}
                 style={{
                   left: `${(r.x / image.naturalWidth) * 100}%`,
                   top: `${(r.y / image.naturalHeight) * 100}%`,
@@ -306,10 +306,13 @@ export function PhotoCanvas({
               />
             ))}
 
-          {/* Draft rectangle while drawing */}
+          {/* Draft rectangle/oval while drawing */}
           {draft && (
             <div
-              className="pointer-events-none absolute rounded-sm border-2 border-emerald-500 bg-emerald-500/15"
+              className={cn(
+                "pointer-events-none absolute border-2 border-emerald-500 bg-emerald-500/15",
+                brushShape === "ellipse" ? "rounded-full" : "rounded-sm",
+              )}
               style={{
                 left: `${(draft.x / image.naturalWidth) * 100}%`,
                 top: `${(draft.y / image.naturalHeight) * 100}%`,
@@ -322,4 +325,16 @@ export function PhotoCanvas({
       )}
     </div>
   );
+}
+
+/** Test whether a point lies inside an ellipse inscribed in `r`. */
+function pointInEllipse(pt: Rect, r: Rect): boolean {
+  const cx = r.x + r.width / 2;
+  const cy = r.y + r.height / 2;
+  const rx = r.width / 2;
+  const ry = r.height / 2;
+  if (rx <= 0 || ry <= 0) return false;
+  const dx = (pt.x - cx) / rx;
+  const dy = (pt.y - cy) / ry;
+  return dx * dx + dy * dy <= 1;
 }

@@ -1,11 +1,18 @@
 // Canvas blur rendering utilities. All regions are in the same coordinate
 // space as the destination canvas (caller scales natural -> canvas coords).
 
-import type { BlurIntensity, BlurType, Rect } from "./types";
+import type { BlurIntensity, BlurType, RegionShape, Rect } from "./types";
 
 export interface RenderOptions {
   blurType: BlurType;
   intensity: BlurIntensity;
+}
+
+export interface RenderRegion {
+  region: Rect;
+  blurred: boolean;
+  isFace: boolean;
+  shape: RegionShape;
 }
 
 /** Block size (in destination px) for pixelation per intensity. */
@@ -47,9 +54,32 @@ export function drawBase(
   ctx.drawImage(source, 0, 0, width, height);
 }
 
+/** Clip to a region's shape (rect or ellipse). */
+function clipShape(
+  ctx: CanvasRenderingContext2D,
+  region: Rect,
+  shape: RegionShape,
+) {
+  ctx.beginPath();
+  if (shape === "ellipse") {
+    ctx.ellipse(
+      region.x + region.width / 2,
+      region.y + region.height / 2,
+      region.width / 2,
+      region.height / 2,
+      0,
+      0,
+      Math.PI * 2,
+    );
+  } else {
+    ctx.rect(region.x, region.y, region.width, region.height);
+  }
+  ctx.clip();
+}
+
 /**
- * Apply a blur effect to a single rectangular region by sampling from the
- * pristine source (so effects are idempotent and never compound).
+ * Apply a blur effect to a single region by sampling from the pristine
+ * source (so effects are idempotent and never compound).
  */
 export function blurRegion(
   ctx: CanvasRenderingContext2D,
@@ -59,16 +89,14 @@ export function blurRegion(
   destW: number,
   destH: number,
   region: Rect,
+  shape: RegionShape,
   opts: RenderOptions,
 ) {
-  // Scale region from destination space to source space so we sample
-  // crisp pixels from the original image.
   const sx = (region.x / destW) * sourceW;
   const sy = (region.y / destH) * sourceH;
   const sw = (region.width / destW) * sourceW;
   const sh = (region.height / destH) * sourceH;
 
-  // Clamp to source bounds.
   const cx = Math.max(0, Math.min(sx, sourceW));
   const cy = Math.max(0, Math.min(sy, sourceH));
   const cw = Math.max(1, Math.min(sw, sourceW - cx));
@@ -83,6 +111,7 @@ export function blurRegion(
 
   if (opts.blurType === "black") {
     ctx.save();
+    clipShape(ctx, region, shape);
     ctx.fillStyle = "#000000";
     ctx.fillRect(dx, dy, dw, dh);
     ctx.restore();
@@ -92,12 +121,8 @@ export function blurRegion(
   if (opts.blurType === "gaussian") {
     const radius = gaussianRadius(opts.intensity);
     ctx.save();
-    // Clip to the region so the blur stays contained.
-    ctx.beginPath();
-    ctx.rect(dx, dy, dw, dh);
-    ctx.clip();
+    clipShape(ctx, region, shape);
     ctx.filter = `blur(${radius}px)`;
-    // Draw the same source region (oversampled a little to fill the blur edge).
     const overscan = radius * 2;
     ctx.drawImage(
       source,
@@ -128,16 +153,14 @@ export function blurRegion(
   tctx.imageSmoothingQuality = "high";
   tctx.drawImage(source, cx, cy, cw, ch, 0, 0, tw, th);
   ctx.save();
+  clipShape(ctx, region, shape);
   ctx.imageSmoothingEnabled = false;
   ctx.drawImage(tmp, 0, 0, tw, th, dx, dy, dw, dh);
   ctx.restore();
 }
 
 /** Convert a face bounding box to a square region (circle circumscribing the face). */
-export function faceToSquareRegion(
-  face: Rect,
-  padding = 0.12,
-): Rect {
+export function faceToSquareRegion(face: Rect, padding = 0.12): Rect {
   const size = Math.max(face.width, face.height) * (1 + padding);
   const cx = face.x + face.width / 2;
   const cy = face.y + face.height / 2;
@@ -159,13 +182,14 @@ export function renderComposite(
   sourceH: number,
   destW: number,
   destH: number,
-  regions: { region: Rect; blurred: boolean; isFace: boolean }[],
+  regions: RenderRegion[],
   opts: RenderOptions,
 ) {
   drawBase(ctx, source, destW, destH);
   for (const r of regions) {
     if (!r.blurred) continue;
     const region = r.isFace ? faceToSquareRegion(r.region) : r.region;
-    blurRegion(ctx, source, sourceW, sourceH, destW, destH, region, opts);
+    const shape: RegionShape = r.isFace ? "ellipse" : r.shape;
+    blurRegion(ctx, source, sourceW, sourceH, destW, destH, region, shape, opts);
   }
 }

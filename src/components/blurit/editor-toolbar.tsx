@@ -12,6 +12,7 @@ import {
   CircleSlash,
   Loader2,
   Sparkles,
+  Circle,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -19,7 +20,12 @@ import {
   ToggleGroupItem,
 } from "@/components/ui/toggle-group";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
-import type { BlurIntensity, BlurType, Tool } from "@/lib/blurit/types";
+import type {
+  BlurIntensity,
+  BlurType,
+  RegionShape,
+  Tool,
+} from "@/lib/blurit/types";
 
 interface EditorToolbarProps {
   tool: Tool;
@@ -28,6 +34,8 @@ interface EditorToolbarProps {
   setBlurType: (t: BlurType) => void;
   intensity: BlurIntensity;
   setIntensity: (i: BlurIntensity) => void;
+  brushShape: RegionShape;
+  setBrushShape: (s: RegionShape) => void;
   onDownload: () => void;
   onNew: () => void;
   onClearManual: () => void;
@@ -49,6 +57,8 @@ export function EditorToolbar(props: EditorToolbarProps) {
     setBlurType,
     intensity,
     setIntensity,
+    brushShape,
+    setBrushShape,
     onDownload,
     onNew,
     onClearManual,
@@ -86,6 +96,25 @@ export function EditorToolbar(props: EditorToolbarProps) {
             <span className="hidden sm:inline">Erase</span>
           </ToggleGroupItem>
         </ToggleGroup>
+
+        {/* Brush shape — only when brushing */}
+        {tool === "brush" && (
+          <ToggleGroup
+            type="single"
+            value={brushShape}
+            onValueChange={(v) => v && setBrushShape(v as RegionShape)}
+            size="sm"
+            variant="outline"
+            aria-label="Brush shape"
+          >
+            <ToggleGroupItem value="rect" aria-label="Rectangle brush">
+              <Square className="size-4" />
+            </ToggleGroupItem>
+            <ToggleGroupItem value="ellipse" aria-label="Oval brush">
+              <Circle className="size-4" />
+            </ToggleGroupItem>
+          </ToggleGroup>
+        )}
 
         <span className="hidden h-6 w-px bg-border sm:block" />
 

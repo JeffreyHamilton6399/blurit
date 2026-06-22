@@ -53,7 +53,7 @@ export function FaceBadge({
         aspectRatio: "1 / 1",
       }}
       className={cn(
-        "absolute rounded-full transition-all duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-1 focus-visible:ring-emerald-500",
+        "pointer-events-auto absolute rounded-full transition-all duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-1 focus-visible:ring-emerald-500",
         face.blurred
           ? "border-2 border-emerald-500 bg-emerald-500/10 shadow-[0_0_0_2px_rgba(16,185,129,0.15)]"
           : "border-2 border-dashed border-amber-500 bg-amber-500/[0.06] shadow-[0_0_0_2px_rgba(245,158,11,0.12)] animate-pulse",

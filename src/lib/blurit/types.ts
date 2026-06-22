@@ -6,6 +6,9 @@ export type BlurType = "pixelate" | "gaussian" | "black";
 
 export type Tool = "select" | "brush" | "erase";
 
+/** Shape of a blur region. Faces always render as ellipse (circle). */
+export type RegionShape = "rect" | "ellipse";
+
 export interface Rect {
   /** x in natural image pixels */
   x: number;
@@ -24,6 +27,7 @@ export interface FaceRegion extends Rect {
 export interface ManualRegion extends Rect {
   id: string;
   kind: "manual";
+  shape: RegionShape;
 }
 
 export type AnyRegion = FaceRegion | ManualRegion;
@@ -42,6 +46,8 @@ export interface LoadedImage {
 export interface DetectionResult {
   faces: FaceRegion[];
   available: boolean;
+  /** which engine produced the result */
+  engine: "native" | "blazeface" | "none";
   /** short human note about detection availability */
   note: string;
 }

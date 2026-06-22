@@ -21,8 +21,10 @@ import type {
   LoadedImage,
   ManualRegion,
   Rect,
+  RegionShape,
   Tool,
 } from "@/lib/blurit/types";
+import { ThemeToggle } from "./theme-toggle";
 
 export function BlurItApp() {
   const { toast } = useToast();
@@ -33,6 +35,7 @@ export function BlurItApp() {
   const [blurType, setBlurType] = React.useState<BlurType>("pixelate");
   const [intensity, setIntensity] = React.useState<BlurIntensity>("medium");
   const [tool, setTool] = React.useState<Tool>("select");
+  const [brushShape, setBrushShape] = React.useState<RegionShape>("rect");
 
   const [detecting, setDetecting] = React.useState(false);
   const [detectionNote, setDetectionNote] = React.useState("");
@@ -117,10 +120,13 @@ export function BlurItApp() {
     );
   }, []);
 
-  const addManual = React.useCallback((region: Rect) => {
+  const addManual = React.useCallback((region: Rect, shape: RegionShape) => {
     manualIdRef.current += 1;
     const id = `manual-${Date.now()}-${manualIdRef.current}`;
-    setManualRegions((prev) => [...prev, { id, kind: "manual", ...region }]);
+    setManualRegions((prev) => [
+      ...prev,
+      { id, kind: "manual", shape, ...region },
+    ]);
   }, []);
 
   const removeManual = React.useCallback((id: string) => {
@@ -186,6 +192,7 @@ export function BlurItApp() {
           },
           blurred: f.blurred,
           isFace: true,
+          shape: "ellipse" as RegionShape,
         })),
         ...manualRegions.map((m) => ({
           region: {
@@ -196,6 +203,7 @@ export function BlurItApp() {
           },
           blurred: true,
           isFace: false,
+          shape: m.shape,
         })),
       ];
 
@@ -262,6 +270,7 @@ export function BlurItApp() {
               <span className="text-xs font-medium">Donate</span>
             </a>
           </Button>
+          <ThemeToggle />
           <SettingsMenu
             onOpenPrivacy={() => setLegalKind("privacy")}
             onOpenTerms={() => setLegalKind("terms")}
@@ -280,6 +289,8 @@ export function BlurItApp() {
               setBlurType={setBlurType}
               intensity={intensity}
               setIntensity={setIntensity}
+              brushShape={brushShape}
+              setBrushShape={setBrushShape}
               onDownload={handleDownload}
               onNew={handleNew}
               onClearManual={clearManual}
@@ -299,6 +310,7 @@ export function BlurItApp() {
               blurType={blurType}
               intensity={intensity}
               tool={tool}
+              brushShape={brushShape}
               onToggleFace={toggleFace}
               onAddManual={addManual}
               onRemoveManual={removeManual}
