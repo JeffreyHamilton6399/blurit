@@ -110,18 +110,14 @@ function buildResult(
   engine: DetectionResult["engine"],
 ): DetectionResult {
   const note =
-    engine === "native"
-      ? faces.length > 0
-        ? `${faces.length} face${faces.length > 1 ? "s" : ""} found`
-        : "No faces found — draw boxes manually"
-      : faces.length > 0
-        ? `${faces.length} face${faces.length > 1 ? "s" : ""} found`
-        : "No faces found — draw boxes manually";
-  return { faces, available, engine, note };
+    faces.length > 0
+      ? `${faces.length} face${faces.length > 1 ? "s" : ""} found`
+      : "No faces found — draw boxes manually";
+  return { faces, textRegions: [], available, engine, note };
 }
 
 function manualResult(note: string): DetectionResult {
-  return { faces: [], available: false, engine: "none", note };
+  return { faces: [], textRegions: [], available: false, engine: "none", note };
 }
 
 function toFaces(

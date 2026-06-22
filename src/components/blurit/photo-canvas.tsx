@@ -11,22 +11,27 @@ import type {
   ManualRegion,
   Rect,
   RegionShape,
+  TextRegion,
   Tool,
 } from "@/lib/blurit/types";
 import { FaceBadge } from "./face-badge";
+import { TextBadge } from "./text-badge";
 
 interface PhotoCanvasProps {
   image: LoadedImage;
   faces: FaceRegion[];
+  textRegions: TextRegion[];
   manualRegions: ManualRegion[];
   blurType: BlurType;
   intensity: BlurIntensity;
   tool: Tool;
   brushShape: RegionShape;
   onToggleFace: (id: string) => void;
+  onToggleText: (id: string) => void;
   onAddManual: (region: Rect, shape: RegionShape) => void;
   onRemoveManual: (id: string) => void;
   onUnblurFace: (id: string) => void;
+  onUnblurText: (id: string) => void;
 }
 
 const MAX_WORK = 2048;
@@ -41,15 +46,18 @@ interface OverlayBox {
 export function PhotoCanvas({
   image,
   faces,
+  textRegions,
   manualRegions,
   blurType,
   intensity,
   tool,
   brushShape,
   onToggleFace,
+  onToggleText,
   onAddManual,
   onRemoveManual,
   onUnblurFace,
+  onUnblurText,
 }: PhotoCanvasProps) {
   const rootRef = React.useRef<HTMLDivElement>(null);
   const canvasRef = React.useRef<HTMLCanvasElement>(null);
@@ -125,6 +133,17 @@ export function PhotoCanvas({
         isFace: true,
         shape: "ellipse" as RegionShape,
       })),
+      ...textRegions.map((t) => ({
+        region: {
+          x: t.x * sx,
+          y: t.y * sy,
+          width: t.width * sx,
+          height: t.height * sy,
+        },
+        blurred: t.blurred,
+        isFace: false,
+        shape: "rect" as RegionShape,
+      })),
       ...manualRegions.map((m) => ({
         region: {
           x: m.x * sx,
@@ -155,6 +174,7 @@ export function PhotoCanvas({
     workW,
     workH,
     faces,
+    textRegions,
     manualRegions,
     blurType,
     intensity,
@@ -185,6 +205,18 @@ export function PhotoCanvas({
               pt.y <= r.y + r.height;
         if (inside) return { type: "manual" as const, id: r.id };
       }
+      for (let i = textRegions.length - 1; i >= 0; i--) {
+        if (!textRegions[i].blurred) continue;
+        const r = textRegions[i];
+        if (
+          pt.x >= r.x &&
+          pt.x <= r.x + r.width &&
+          pt.y >= r.y &&
+          pt.y <= r.y + r.height
+        ) {
+          return { type: "text" as const, id: r.id };
+        }
+      }
       for (let i = faces.length - 1; i >= 0; i--) {
         if (!faces[i].blurred) continue;
         const sq = faceToSquareRegion(faces[i]);
@@ -194,7 +226,7 @@ export function PhotoCanvas({
       }
       return null;
     },
-    [manualRegions, faces],
+    [manualRegions, textRegions, faces],
   );
 
   const onPointerDown = (e: React.PointerEvent) => {
@@ -206,6 +238,7 @@ export function PhotoCanvas({
       const hit = hitTest({ ...p });
       if (hit?.type === "manual") onRemoveManual(hit.id);
       else if (hit?.type === "face") onUnblurFace(hit.id);
+      else if (hit?.type === "text") onUnblurText(hit.id);
       return;
     }
     dragRef.current = {
@@ -284,6 +317,18 @@ export function PhotoCanvas({
               naturalWidth={image.naturalWidth}
               naturalHeight={image.naturalHeight}
               onToggle={onToggleFace}
+              className={cn(!badgesInteractive && "pointer-events-none")}
+            />
+          ))}
+
+          {/* Text / plate badges */}
+          {textRegions.map((t) => (
+            <TextBadge
+              key={t.id}
+              region={t}
+              naturalWidth={image.naturalWidth}
+              naturalHeight={image.naturalHeight}
+              onToggle={onToggleText}
               className={cn(!badgesInteractive && "pointer-events-none")}
             />
           ))}

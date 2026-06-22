@@ -13,71 +13,185 @@ import { TermsGate } from "./terms-gate";
 import { LegalDialog, type LegalKind } from "./legal-dialog";
 import { decodeFile, canvasToBlob, outputFileName, isAccepted } from "@/lib/blurit/image";
 import { detectFaces } from "@/lib/blurit/face-detect";
+import { detectText, terminateTextWorker } from "@/lib/blurit/text-detect";
 import { renderComposite } from "@/lib/blurit/blur";
 import type {
   BlurIntensity,
   BlurType,
+  DetectionModes,
   FaceRegion,
   LoadedImage,
   ManualRegion,
   Rect,
   RegionShape,
+  TextRegion,
   Tool,
 } from "@/lib/blurit/types";
-import { ThemeToggle } from "./theme-toggle";
+
+const MODES_KEY = "blurit:detection-modes-v1";
+
+function loadModes(): DetectionModes {
+  try {
+    const raw = localStorage.getItem(MODES_KEY);
+    if (raw) {
+      const p = JSON.parse(raw) as Partial<DetectionModes>;
+      return {
+        faces: p.faces !== false,
+        text: p.text === true,
+      };
+    }
+  } catch {
+    /* ignore */
+  }
+  return { faces: true, text: false };
+}
 
 export function BlurItApp() {
   const { toast } = useToast();
 
   const [image, setImage] = React.useState<LoadedImage | null>(null);
   const [faces, setFaces] = React.useState<FaceRegion[]>([]);
+  const [textRegions, setTextRegions] = React.useState<TextRegion[]>([]);
   const [manualRegions, setManualRegions] = React.useState<ManualRegion[]>([]);
   const [blurType, setBlurType] = React.useState<BlurType>("pixelate");
   const [intensity, setIntensity] = React.useState<BlurIntensity>("medium");
   const [tool, setTool] = React.useState<Tool>("select");
   const [brushShape, setBrushShape] = React.useState<RegionShape>("rect");
 
+  const [modes, setModes] = React.useState<DetectionModes>({
+    faces: true,
+    text: false,
+  });
+  const [modesReady, setModesReady] = React.useState(false);
+
   const [detecting, setDetecting] = React.useState(false);
   const [detectionNote, setDetectionNote] = React.useState("");
-  const [detectionAvailable, setDetectionAvailable] = React.useState(true);
   const [downloading, setDownloading] = React.useState(false);
   const [legalKind, setLegalKind] = React.useState<LegalKind>(null);
 
   const manualIdRef = React.useRef(0);
+  const runIdRef = React.useRef(0);
 
-  // ---- File loading ------------------------------------------------------
+  // Load persisted detection modes on mount.
+  React.useEffect(() => {
+    setModes(loadModes());
+    setModesReady(true);
+  }, []);
+
+  // Persist detection modes.
+  React.useEffect(() => {
+    if (!modesReady) return;
+    try {
+      localStorage.setItem(MODES_KEY, JSON.stringify(modes));
+    } catch {
+      /* ignore */
+    }
+  }, [modes, modesReady]);
+
+  // ---- File loading + detection -----------------------------------------
+  const runDetection = React.useCallback(
+    async (loaded: LoadedImage, currentModes: DetectionModes) => {
+      const myRun = ++runIdRef.current;
+      setFaces([]);
+      setTextRegions([]);
+      setDetecting(true);
+
+      const notes: string[] = [];
+      let anyAvailable = false;
+
+      if (currentModes.faces) {
+        setDetectionNote("Detecting faces…");
+        try {
+          const result = await detectFaces(
+            loaded.bitmap,
+            loaded.naturalWidth,
+            loaded.naturalHeight,
+          );
+          if (myRun !== runIdRef.current) return; // superseded
+          setFaces(result.faces);
+          if (result.available) {
+            anyAvailable = true;
+            notes.push(
+              result.faces.length > 0
+                ? `${result.faces.length} face${result.faces.length > 1 ? "s" : ""}`
+                : "No faces",
+            );
+          } else {
+            notes.push("Face detect off");
+          }
+        } catch {
+          notes.push("Face detect failed");
+        }
+      } else {
+        notes.push("Faces off");
+      }
+
+      if (currentModes.text) {
+        setDetectionNote(
+          notes.length > 0 ? `${notes.join(" · ")} · scanning text…` : "Scanning text…",
+        );
+        try {
+          const text = await detectText(
+            loaded.bitmap,
+            loaded.naturalWidth,
+            loaded.naturalHeight,
+          );
+          if (myRun !== runIdRef.current) return; // superseded
+          setTextRegions(text);
+          anyAvailable = true;
+          notes.push(
+            text.length > 0
+              ? `${text.length} text${text.length > 1 ? "s" : ""}`
+              : "No text",
+          );
+        } catch {
+          notes.push("Text detect failed");
+        }
+      }
+
+      if (myRun !== runIdRef.current) return;
+      setDetecting(false);
+
+      if (!anyAvailable) {
+        setDetectionNote("Detection off — draw blur boxes manually.");
+      } else {
+        setDetectionNote(
+          notes.length > 0 ? notes.join(" · ") : "Detection complete",
+        );
+      }
+    },
+    [],
+  );
+
   const loadFile = React.useCallback(
-    async (file: File) => {
+    async (file: File, currentModes: DetectionModes) => {
       try {
         setDetecting(true);
-        setFaces([]);
         setManualRegions([]);
         setDetectionNote("Loading…");
         const loaded = await decodeFile(file);
         setImage(loaded);
-        setDetectionNote("Detecting faces…");
-        const result = await detectFaces(
-          loaded.bitmap,
-          loaded.naturalWidth,
-          loaded.naturalHeight,
-        );
-        setFaces(result.faces);
-        setDetectionAvailable(result.available);
-        setDetectionNote(result.note);
+        await runDetection(loaded, currentModes);
       } catch (e) {
         toast({
           title: "Could not load photo",
-          description:
-            e instanceof Error ? e.message : "Unknown error",
+          description: e instanceof Error ? e.message : "Unknown error",
           variant: "destructive",
         });
         setImage(null);
-      } finally {
         setDetecting(false);
       }
     },
-    [toast],
+    [runDetection, toast],
   );
+
+  // Re-run detection when modes change AND an image is loaded.
+  React.useEffect(() => {
+    if (!image || !modesReady) return;
+    runDetection(image, modes);
+    // We intentionally exclude runDetection from deps to avoid loops; it's
+    // stable-ish (only depends on setState which is stable).
+  }, [modes, modesReady]);
 
   const handleError = React.useCallback(
     (message: string) => {
@@ -97,7 +211,7 @@ export function BlurItApp() {
           const file = item.getAsFile();
           if (file && isAccepted(file)) {
             e.preventDefault();
-            loadFile(file);
+            loadFile(file, modes);
           }
           break;
         }
@@ -105,7 +219,7 @@ export function BlurItApp() {
     };
     window.addEventListener("paste", onPaste);
     return () => window.removeEventListener("paste", onPaste);
-  }, [image, loadFile]);
+  }, [image, loadFile, modes]);
 
   // ---- Region editing ----------------------------------------------------
   const toggleFace = React.useCallback((id: string) => {
@@ -114,9 +228,21 @@ export function BlurItApp() {
     );
   }, []);
 
+  const toggleText = React.useCallback((id: string) => {
+    setTextRegions((prev) =>
+      prev.map((t) => (t.id === id ? { ...t, blurred: !t.blurred } : t)),
+    );
+  }, []);
+
   const unblurFace = React.useCallback((id: string) => {
     setFaces((prev) =>
       prev.map((f) => (f.id === id ? { ...f, blurred: false } : f)),
+    );
+  }, []);
+
+  const unblurText = React.useCallback((id: string) => {
+    setTextRegions((prev) =>
+      prev.map((t) => (t.id === id ? { ...t, blurred: false } : t)),
     );
   }, []);
 
@@ -139,27 +265,32 @@ export function BlurItApp() {
 
   const blurAll = React.useCallback(() => {
     setFaces((prev) => prev.map((f) => ({ ...f, blurred: true })));
+    setTextRegions((prev) => prev.map((t) => ({ ...t, blurred: true })));
   }, []);
 
   // ---- New file / reset --------------------------------------------------
   const handleNew = React.useCallback(() => {
+    runIdRef.current++; // invalidate any in-flight detection
     setImage((prev) => {
       prev?.bitmap.close?.();
       return null;
     });
     setFaces([]);
+    setTextRegions([]);
     setManualRegions([]);
     setTool("select");
     setDetectionNote("");
+    setDetecting(false);
   }, []);
 
-  // Cleanup bitmap on unmount.
+  // Cleanup bitmap + OCR worker on unmount.
   React.useEffect(() => {
     return () => {
       setImage((prev) => {
         prev?.bitmap.close?.();
         return prev;
       });
+      terminateTextWorker();
     };
   }, []);
 
@@ -193,6 +324,17 @@ export function BlurItApp() {
           blurred: f.blurred,
           isFace: true,
           shape: "ellipse" as RegionShape,
+        })),
+        ...textRegions.map((t) => ({
+          region: {
+            x: t.x * sx,
+            y: t.y * sy,
+            width: t.width * sx,
+            height: t.height * sy,
+          },
+          blurred: t.blurred,
+          isFace: false,
+          shape: "rect" as RegionShape,
         })),
         ...manualRegions.map((m) => ({
           region: {
@@ -243,10 +385,12 @@ export function BlurItApp() {
     } finally {
       setDownloading(false);
     }
-  }, [image, faces, manualRegions, blurType, intensity, toast]);
+  }, [image, faces, textRegions, manualRegions, blurType, intensity, toast]);
 
-  const blurredCount = faces.filter((f) => f.blurred).length;
-  const unblurredFaces = faces.length - blurredCount;
+  const blurredFaceCount = faces.filter((f) => f.blurred).length;
+  const blurredTextCount = textRegions.filter((t) => t.blurred).length;
+  const unblurredDetected =
+    faces.length - blurredFaceCount + (textRegions.length - blurredTextCount);
 
   return (
     <div className="flex h-dvh flex-col overflow-hidden bg-background text-foreground">
@@ -270,10 +414,11 @@ export function BlurItApp() {
               <span className="text-xs font-medium">Donate</span>
             </a>
           </Button>
-          <ThemeToggle />
           <SettingsMenu
             onOpenPrivacy={() => setLegalKind("privacy")}
             onOpenTerms={() => setLegalKind("terms")}
+            modes={modes}
+            setModes={setModes}
           />
         </div>
       </header>
@@ -295,30 +440,39 @@ export function BlurItApp() {
               onNew={handleNew}
               onClearManual={clearManual}
               onBlurAll={blurAll}
-              canBlurAll={unblurredFaces > 0}
+              canBlurAll={unblurredDetected > 0}
               faceCount={faces.length}
-              blurredCount={blurredCount}
+              blurredFaceCount={blurredFaceCount}
+              textCount={textRegions.length}
+              blurredTextCount={blurredTextCount}
               manualCount={manualRegions.length}
-              detectionNote={detecting ? "Detecting faces…" : detectionNote}
-              detectionAvailable={detectionAvailable}
+              detectionNote={detectionNote}
+              detecting={detecting}
               downloading={downloading}
             />
             <PhotoCanvas
               image={image}
               faces={faces}
+              textRegions={textRegions}
               manualRegions={manualRegions}
               blurType={blurType}
               intensity={intensity}
               tool={tool}
               brushShape={brushShape}
               onToggleFace={toggleFace}
+              onToggleText={toggleText}
               onAddManual={addManual}
               onRemoveManual={removeManual}
               onUnblurFace={unblurFace}
+              onUnblurText={unblurText}
             />
           </div>
         ) : (
-          <Dropzone onFile={loadFile} onError={handleError} busy={detecting} />
+          <Dropzone
+            onFile={(f) => loadFile(f, modes)}
+            onError={handleError}
+            busy={detecting}
+          />
         )}
       </main>
 

@@ -9,10 +9,20 @@ interface LogoProps extends React.SVGProps<SVGSVGElement> {
 /**
  * Flat BlurIt mark: a face (circle) with a pixelated mosaic block covering
  * the "eye" region — face + blur, instantly readable. No gradients.
+ *
+ * Renders as a button so tapping it reloads the app (resets everything).
  */
 export function Logo({ withText = true, className, ...props }: LogoProps) {
   return (
-    <span className={cn("inline-flex items-center gap-2", className)}>
+    <button
+      type="button"
+      onClick={() => window.location.reload()}
+      aria-label="BlurIt — reload"
+      className={cn(
+        "inline-flex items-center gap-2 rounded-md outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 focus-visible:ring-offset-1",
+        className,
+      )}
+    >
       <svg
         viewBox="0 0 32 32"
         width={22}
@@ -45,6 +55,6 @@ export function Logo({ withText = true, className, ...props }: LogoProps) {
           BlurIt
         </span>
       )}
-    </span>
+    </button>
   );
 }

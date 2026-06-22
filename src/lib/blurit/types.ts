@@ -18,6 +18,9 @@ export interface Rect {
   height: number;
 }
 
+/** Kind of auto-detected region (used for badges + coloring). */
+export type DetectionKind = "face" | "text";
+
 export interface FaceRegion extends Rect {
   id: string;
   kind: "face";
@@ -30,7 +33,15 @@ export interface ManualRegion extends Rect {
   shape: RegionShape;
 }
 
-export type AnyRegion = FaceRegion | ManualRegion;
+export type AnyRegion = FaceRegion | ManualRegion | TextRegion;
+
+export interface TextRegion extends Rect {
+  id: string;
+  kind: "text";
+  /** what the OCR read (license plate, address fragment, etc.) */
+  label: string;
+  blurred: boolean;
+}
 
 export interface LoadedImage {
   bitmap: ImageBitmap;
@@ -43,8 +54,15 @@ export interface LoadedImage {
   outputMime: string;
 }
 
+/** Which detectors are enabled by the user (settings). */
+export interface DetectionModes {
+  faces: boolean;
+  text: boolean;
+}
+
 export interface DetectionResult {
   faces: FaceRegion[];
+  textRegions: TextRegion[];
   available: boolean;
   /** which engine produced the result */
   engine: "native" | "blazeface" | "none";

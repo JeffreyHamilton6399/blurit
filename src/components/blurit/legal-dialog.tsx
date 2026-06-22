@@ -73,11 +73,12 @@ function PrivacyBody() {
         retain a copy after you leave or open a new photo.
       </p>
       <p className="text-xs">
-        Face detection runs entirely on your device. On Chrome and Edge it uses
-        your browser&apos;s built-in FaceDetector. On other browsers it loads a
-        small face-detection model (weights only, served from this site&apos;s
-        own origin — no third-party fetch) and runs it locally. Your photo is
-        never sent anywhere.
+        Face and text detection run entirely on your device. Face detection uses
+        your browser&apos;s built-in FaceDetector (Chrome/Edge) or a small
+        self-hosted model (other browsers). Text and license-plate detection uses
+        a self-hosted OCR engine (Tesseract.js) — its worker, WASM core, and
+        language data are all served from this site&apos;s own origin with no
+        third-party fetch. Your photo is never sent anywhere.
       </p>
     </>
   );
