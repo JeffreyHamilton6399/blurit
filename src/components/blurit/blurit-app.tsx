@@ -7,7 +7,7 @@ import { useToast } from "@/hooks/use-toast";
 import { Logo } from "./logo";
 import { Dropzone } from "./dropzone";
 import { PhotoCanvas } from "./photo-canvas";
-import { EditorToolbar } from "./editor-toolbar";
+import { EditorSidebar } from "./editor-sidebar";
 import { SettingsMenu, DONATE_URL } from "./settings-menu";
 import { TermsGate } from "./terms-gate";
 import { LegalDialog, type LegalKind } from "./legal-dialog";
@@ -424,10 +424,10 @@ export function BlurItApp() {
       </header>
 
       {/* Main */}
-      <main className="flex min-h-0 flex-1 flex-col px-3 py-2">
+      <main className="flex min-h-0 flex-1">
         {image ? (
-          <div className="flex min-h-0 flex-1 flex-col gap-2">
-            <EditorToolbar
+          <>
+            <EditorSidebar
               tool={tool}
               setTool={setTool}
               blurType={blurType}
@@ -450,23 +450,25 @@ export function BlurItApp() {
               detecting={detecting}
               downloading={downloading}
             />
-            <PhotoCanvas
-              image={image}
-              faces={faces}
-              textRegions={textRegions}
-              manualRegions={manualRegions}
-              blurType={blurType}
-              intensity={intensity}
-              tool={tool}
-              brushShape={brushShape}
-              onToggleFace={toggleFace}
-              onToggleText={toggleText}
-              onAddManual={addManual}
-              onRemoveManual={removeManual}
-              onUnblurFace={unblurFace}
-              onUnblurText={unblurText}
-            />
-          </div>
+            <div className="flex min-h-0 min-w-0 flex-1 flex-col p-2">
+              <PhotoCanvas
+                image={image}
+                faces={faces}
+                textRegions={textRegions}
+                manualRegions={manualRegions}
+                blurType={blurType}
+                intensity={intensity}
+                tool={tool}
+                brushShape={brushShape}
+                onToggleFace={toggleFace}
+                onToggleText={toggleText}
+                onAddManual={addManual}
+                onRemoveManual={removeManual}
+                onUnblurFace={unblurFace}
+                onUnblurText={unblurText}
+              />
+            </div>
+          </>
         ) : (
           <Dropzone
             onFile={(f) => loadFile(f, modes)}
