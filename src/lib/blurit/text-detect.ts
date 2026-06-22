@@ -41,7 +41,11 @@ interface TesseractResult {
 }
 
 interface TesseractWorker {
-  recognize: (image: string) => Promise<TesseractResult>;
+  recognize: (
+    image: string | Blob,
+    opts?: Record<string, unknown>,
+    output?: { text?: boolean; blocks?: boolean },
+  ) => Promise<TesseractResult>;
   setParameters: (params: Record<string, string>) => Promise<void>;
   terminate: () => Promise<void>;
 }
@@ -54,8 +58,6 @@ async function loadWorker(): Promise<TesseractWorker | null> {
       const { createWorker } = await import("tesseract.js");
       const origin =
         typeof window !== "undefined" ? window.location.origin : "";
-      // OEM 1 = LSTM_ONLY. Uses the smaller simd-lstm core + best_int model.
-      // Fast and accurate for modern text. Falls back gracefully if unavailable.
       const worker = (await createWorker(["eng"], 1, {
         workerBlobURL: false,
         workerPath: `${origin}/tesseract/worker.min.js`,
@@ -67,8 +69,9 @@ async function loadWorker(): Promise<TesseractWorker | null> {
         errorHandler: (e: unknown) =>
           console.error("[BlurIt tesseract err]", e),
       })) as unknown as TesseractWorker;
-      // PSM 11 = SPARSE_TEXT: find text anywhere in the image.
-      await worker.setParameters({ tessedit_pageseg_mode: "11" });
+      // PSM 3 = AUTO: full page segmentation. Best all-rounder for documents,
+      // signs, plates, and mixed content. PSM 11 (sparse) missed clear text.
+      await worker.setParameters({ tessedit_pageseg_mode: "3" });
       return worker;
     })();
   }
@@ -77,8 +80,6 @@ async function loadWorker(): Promise<TesseractWorker | null> {
 
 /**
  * Detect text regions (license plates, addresses, documents) via OCR.
- * Returns merged bounding boxes labeled with a short snippet of recognized
- * text. Runs on a downscaled, contrast-stretched canvas for speed/accuracy.
  */
 export async function detectText(
   bitmap: ImageBitmap,
@@ -120,7 +121,8 @@ export async function detectText(
   const url = URL.createObjectURL(blob);
   let result: TesseractResult;
   try {
-    result = await worker.recognize(url);
+    // v7: MUST pass output { text: true, blocks: true } to get word boxes.
+    result = await worker.recognize(url, {}, { text: true, blocks: true });
   } catch {
     URL.revokeObjectURL(url);
     return [];
@@ -129,7 +131,7 @@ export async function detectText(
   onProgress?.(0.9);
 
   const data = result?.data;
-  // v5 nests words under blocks[].paragraphs[].lines[].words.
+  // v7 nests words under blocks[].paragraphs[].lines[].words.
   const nestedWords: TesseractWord[] = [];
   for (const block of data?.blocks ?? []) {
     for (const paragraph of block?.paragraphs ?? []) {
@@ -140,7 +142,7 @@ export async function detectText(
   }
   const allWords = (data?.words?.length ? data.words : nestedWords) ?? [];
   const words = allWords.filter(
-    (w) => w.confidence >= 40 && isLikelyRealText(w.text),
+    (w) => w.confidence >= 55 && isLikelyRealText(w.text),
   );
 
   if (words.length === 0) return [];

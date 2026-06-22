@@ -4,10 +4,6 @@
 //    served same-origin from /public/models so no third-party fetch)
 // -> manual only (draw blur boxes by hand).
 //
-// Improvements: lower score threshold (0.4), larger detection canvas (800px
-// longest side for better small-face recall), and non-maximum suppression to
-// remove overlapping duplicate boxes from either engine.
-//
 // Privacy: the BlazeFace model weights load from the SAME ORIGIN (/models/).
 // Your photo is NEVER sent anywhere — detection runs locally in the browser.
 
@@ -35,9 +31,8 @@ export async function detectFaces(
   naturalWidth: number,
   naturalHeight: number,
 ): Promise<DetectionResult> {
-  // Larger detection canvas (800px) improves small-face recall without a
-  // meaningful speed cost on modern devices.
-  const MAX = 800;
+  // 1000px canvas — best balance of small-face recall and speed.
+  const MAX = 1000;
   const scale =
     Math.max(naturalWidth, naturalHeight) > MAX
       ? MAX / Math.max(naturalWidth, naturalHeight)
@@ -68,7 +63,7 @@ export async function detectFaces(
           };
         }
       ).FaceDetector;
-      const detector = new FD({ fastMode: false, maxDetectedFaces: 50 });
+      const detector = new FD({ fastMode: false, maxDetectedFaces: 100 });
       const detected = await detector.detect(detectCanvas);
       try {
         detector.release?.();
@@ -101,7 +96,6 @@ export async function detectFaces(
     // fall through to manual
   }
 
-  // 3. Manual only.
   return manualResult(
     "Detection unavailable — draw blur boxes manually.",
   );
@@ -149,10 +143,7 @@ function toFaces(
   });
 }
 
-/**
- * Non-maximum suppression: remove boxes that overlap a higher-scoring box by
- * more than 30% IoU. Faces are kept in detection order (earlier = preferred).
- */
+/** Non-maximum suppression: remove boxes overlapping a higher-scoring one. */
 function nms(faces: FaceRegion[], iouThreshold = 0.3): FaceRegion[] {
   const kept: FaceRegion[] = [];
   const suppressed = new Set<string>();
@@ -177,8 +168,7 @@ function iou(a: Rect, b: Rect): number {
   const interW = Math.max(0, x1 - x0);
   const interH = Math.max(0, y1 - y0);
   const inter = interW * interH;
-  const union =
-    a.width * a.height + b.width * b.height - inter;
+  const union = a.width * a.height + b.width * b.height - inter;
   return union > 0 ? inter / union : 0;
 }
 
@@ -206,7 +196,6 @@ async function loadBlazeFace(): Promise<BlazeFaceModel | null> {
   if (!blazefacePromise) {
     blazefacePromise = (async () => {
       const tf = await import("@tensorflow/tfjs");
-      // Prefer webgl; fall back to cpu for headless / non-GPU environments.
       try {
         await tf.setBackend("webgl");
       } catch {
@@ -215,10 +204,10 @@ async function loadBlazeFace(): Promise<BlazeFaceModel | null> {
       await tf.ready();
       const blazeface = await import("@tensorflow-models/blazeface");
       const model = await blazeface.load({
-        maxFaces: 50,
-        // Lower threshold (0.4) catches more faces, especially partially
-        // occluded or rotated ones. NMS removes the resulting duplicates.
-        scoreThreshold: 0.4,
+        maxFaces: 100,
+        // Low threshold (0.3) catches more faces, including small/partial/
+        // rotated ones. NMS removes the resulting duplicates.
+        scoreThreshold: 0.3,
         // Self-hosted model — same origin, no third-party fetch.
         modelUrl: "/models/blazeface/model.json",
       });

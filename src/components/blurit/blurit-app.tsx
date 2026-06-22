@@ -467,6 +467,55 @@ export function BlurItApp() {
                 onUnblurFace={unblurFace}
                 onUnblurText={unblurText}
               />
+              {/* Detection status bar */}
+              <div className="flex shrink-0 items-center gap-2 px-2 py-1 text-xs text-muted-foreground">
+                {detecting ? (
+                  <span className="flex items-center gap-1.5">
+                    <span className="size-1.5 animate-pulse rounded-full bg-emerald-500" />
+                    {detectionNote || "Scanning…"}
+                  </span>
+                ) : (
+                  <>
+                    <span
+                      className={
+                        faces.length > 0 || textRegions.length > 0
+                          ? "text-emerald-600 dark:text-emerald-400"
+                          : ""
+                      }
+                    >
+                      {detectionNote}
+                    </span>
+                    {(faces.length > 0 || textRegions.length > 0 || manualRegions.length > 0) && (
+                      <span className="text-border">·</span>
+                    )}
+                    {faces.length > 0 && (
+                      <span>
+                        {faces.length} face{faces.length > 1 ? "s" : ""}
+                        {blurredFaceCount > 0 && (
+                          <span className="text-emerald-600 dark:text-emerald-400">
+                            {" "}· {blurredFaceCount} blurred
+                          </span>
+                        )}
+                      </span>
+                    )}
+                    {textRegions.length > 0 && (
+                      <span>
+                        {textRegions.length} text{textRegions.length > 1 ? "s" : ""}
+                        {blurredTextCount > 0 && (
+                          <span className="text-emerald-600 dark:text-emerald-400">
+                            {" "}· {blurredTextCount} blurred
+                          </span>
+                        )}
+                      </span>
+                    )}
+                    {manualRegions.length > 0 && (
+                      <span>
+                        {manualRegions.length} manual
+                      </span>
+                    )}
+                  </>
+                )}
+              </div>
             </div>
           </>
         ) : (
