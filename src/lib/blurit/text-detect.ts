@@ -99,11 +99,13 @@ export async function detectText(
 
   onProgress?.(0.3);
 
-  // Run OCR with PSM 3 (auto) first, then PSM 11 (sparse) if nothing found.
-  // PSM 3 is good for structured text; PSM 11 catches scattered text.
+  // Run OCR with multiple PSM modes to catch text in various layouts:
+  // PSM 3  = auto (best for structured text)
+  // PSM 1  = auto + orientation/script detection (catches sideways/rotated text)
+  // PSM 11 = sparse (catches scattered text like watermarks)
   let allWords: TesseractWord[] = [];
 
-  for (const psm of ["3", "11"]) {
+  for (const psm of ["3", "1", "11"]) {
     try {
       await worker.setParameters({ tessedit_pageseg_mode: psm });
       const result = await worker.recognize(canvas, {}, { text: true, blocks: true });
@@ -113,7 +115,7 @@ export async function detectText(
     } catch (e) {
       console.error(`[BlurIt] PSM ${psm} failed:`, e);
     }
-    // If PSM 3 found words, skip PSM 11.
+    // If PSM 3 found words, skip the rest.
     if (allWords.length > 0) break;
   }
 
@@ -126,10 +128,11 @@ export async function detectText(
     return true;
   });
 
-  // Filter: very low threshold (20) to catch faint text.
+  // Filter: confidence 40 kills wall/texture noise (random false letters).
+  // Require 2+ chars to filter single-char noise.
   const filtered = deduped.filter((w) => {
     const t = w.text.trim();
-    return w.confidence >= 20 && t.length >= 1 && /[a-zA-Z0-9]/.test(t);
+    return w.confidence >= 40 && t.length >= 2 && /[a-zA-Z0-9]{2,}/.test(t);
   });
 
   console.log("[BlurIt] total:", allWords.length, "deduped:", deduped.length, "filtered:", filtered.length);
