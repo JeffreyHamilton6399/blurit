@@ -1,10 +1,6 @@
 // Text / license-plate / document detector.
-// Engine priority: native TextDetector API (Chrome/Edge, instant)
-// -> Tesseract.js (CDN library, self-hosted model — reliable fallback)
-//
-// Tesseract is the best free client-side OCR. It works in all browsers.
-// The library code loads from CDN (jsdelivr); model weights are self-hosted.
-// Your photo is processed entirely in the browser; nothing is uploaded.
+// Engine: native TextDetector (Chrome/Edge) → Tesseract.js v7 (npm package).
+// Model weights self-hosted at /tesseract/. Photos never leave the browser.
 
 import type { TextRegion, Rect } from "./types";
 
@@ -72,7 +68,7 @@ async function detectWithNative(
   }
 }
 
-// ---- Tesseract.js (reliable OCR fallback) ------------------------------
+// ---- Tesseract.js v7 (npm package) -------------------------------------
 
 interface TesseractWord {
   text: string;
@@ -99,45 +95,22 @@ interface TesseractWorker {
   setParameters: (params: Record<string, string>) => Promise<void>;
   terminate: () => Promise<void>;
 }
-interface TesseractCdn {
-  createWorker: (langs: string[], oem: number, options: Record<string, unknown>) => Promise<TesseractWorker>;
-}
-
-let tesseractCdnPromise: Promise<TesseractCdn | null> | null = null;
-
-async function loadTesseractCdn(): Promise<TesseractCdn | null> {
-  if (tesseractCdnPromise) return tesseractCdnPromise;
-  tesseractCdnPromise = (async () => {
-    await new Promise<void>((resolve, reject) => {
-      if ((window as unknown as { Tesseract?: unknown }).Tesseract) { resolve(); return; }
-      const s = document.createElement("script");
-      s.src = "https://cdn.jsdelivr.net/npm/tesseract.js@7/dist/tesseract.min.js";
-      s.onload = () => resolve();
-      s.onerror = () => reject(new Error("tesseract CDN load failed"));
-      document.head.appendChild(s);
-    })();
-    return (window as unknown as { Tesseract: TesseractCdn }).Tesseract;
-  })();
-  return tesseractCdnPromise;
-}
 
 let workerPromise: Promise<TesseractWorker | null> | null = null;
 
 async function loadWorker(): Promise<TesseractWorker | null> {
   if (!workerPromise) {
     workerPromise = (async () => {
-      const Tesseract = await loadTesseractCdn();
-      if (!Tesseract) return null;
+      const { createWorker } = await import("tesseract.js");
       const origin = typeof window !== "undefined" ? window.location.origin : "";
-      const worker = await Tesseract.createWorker(["eng"], 1, {
+      const worker = (await createWorker(["eng"], 1, {
         workerBlobURL: false,
         workerPath: `${origin}/tesseract/worker.min.js`,
         corePath: `${origin}/tesseract/tesseract-core-simd-lstm.js`,
         langPath: `${origin}/tesseract`,
         logger: () => { /* progress only */ },
         errorHandler: (e: unknown) => console.error("[BlurIt tesseract err]", e),
-      });
-      // PSM 11 = SPARSE_TEXT: find text anywhere in the image.
+      })) as unknown as TesseractWorker;
       await worker.setParameters({ tessedit_pageseg_mode: "11" });
       return worker;
     })();
@@ -163,7 +136,6 @@ export async function detectText(
   naturalHeight: number,
   onProgress?: (p: number) => void,
 ): Promise<TextRegion[]> {
-  // Detection canvas — upscale to 1500px for better small-text detection.
   const longest = Math.max(naturalWidth, naturalHeight);
   let scale = 1;
   if (longest < 1500) scale = 1500 / longest;
@@ -214,7 +186,6 @@ async function detectWithTesseract(
   const url = URL.createObjectURL(blob);
   let result: TesseractResult;
   try {
-    // v7: MUST pass output { text: true, blocks: true } to get word boxes.
     result = await worker.recognize(url, {}, { text: true, blocks: true });
   } catch {
     URL.revokeObjectURL(url);
