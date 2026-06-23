@@ -57,14 +57,16 @@ export async function detectFaces(
     } catch { /* fall through */ }
   }
 
-  // 2. SSD MobileNet V1 — full image pass.
+  // 2. SSD MobileNet V1 — full image pass. 0.3 confidence filters shirt
+  //    patterns and texture false positives while keeping real faces.
   let ssdFaces: FaceRegion[] = [];
   try {
-    ssdFaces = await detectWithSsdMobilenet(detectCanvas, dw, dh, naturalWidth, naturalHeight);
+    ssdFaces = await detectWithSsdMobilenet(detectCanvas, dw, dh, naturalWidth, naturalHeight, 0, 0, undefined, undefined, 0.3);
   } catch { /* fall through */ }
 
   // 3. Multi-scale: run SSD on 4 overlapping quadrants (2x zoom) to catch
-  //    small/background faces the full-image pass missed.
+  //    small/background faces. Higher confidence (0.4) because zoomed-in
+  //    texture is more likely to trigger false positives.
   let quadFaces: FaceRegion[] = [];
   if (dw >= 500 && dh >= 500) {
     try {
@@ -144,15 +146,14 @@ async function detectWithSsdMobilenet(
   canvas: HTMLCanvasElement,
   dw: number, dh: number, nw: number, nh: number,
   offsetX = 0, offsetY = 0, srcW?: number, srcH?: number,
+  minConfidence = 0.3,
 ): Promise<FaceRegion[]> {
   const ready = await loadModel();
   if (!ready) return [];
   const faceapi = await import("@vladmandic/face-api");
-  // Very low minConfidence (0.1) to catch every possible face — false
-  // positives are fine, the user can erase them. Better safe than miss.
   const detections = await faceapi.detectAllFaces(
     canvas,
-    new faceapi.SsdMobilenetv1Options({ minConfidence: 0.1, maxResults: 200 }),
+    new faceapi.SsdMobilenetv1Options({ minConfidence, maxResults: 200 }),
   );
   const refW = srcW ?? dw, refH = srcH ?? dh;
   const sx = nw / refW, sy = nh / refH;
@@ -195,7 +196,9 @@ async function detectQuadrants(
       const qctx = qc.getContext("2d", { willReadFrequently: true });
       if (!qctx) return [];
       qctx.drawImage(fullCanvas, q.x, q.y, q.w, q.h, 0, 0, q.w, q.h);
-      return detectWithSsdMobilenet(qc, q.w, q.h, nw, nh, q.x, q.y, dw, dh);
+      // 0.4 confidence for quadrants — higher than full-image (0.3) because
+      // zoomed-in shirt/texture patterns trigger more false positives.
+      return detectWithSsdMobilenet(qc, q.w, q.h, nw, nh, q.x, q.y, dw, dh, 0.4);
     }),
   );
   return results.flat();

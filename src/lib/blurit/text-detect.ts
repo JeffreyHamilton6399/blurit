@@ -169,11 +169,12 @@ export async function detectText(
   naturalHeight: number,
   onProgress?: (p: number) => void,
 ): Promise<TextRegion[]> {
-  // Detection canvas — upscale small images, downscale large ones.
+  // Detection canvas — upscale to 1500px for better OCR on small text.
+  // Bigger text = Tesseract recognizes it more reliably.
   const longest = Math.max(naturalWidth, naturalHeight);
   let scale = 1;
-  if (longest < 1000) scale = 1000 / longest;
-  if (longest > 1600) scale = 1600 / longest;
+  if (longest < 1500) scale = 1500 / longest;
+  if (longest > 2000) scale = 2000 / longest;
   const dw = Math.max(1, Math.round(naturalWidth * scale));
   const dh = Math.max(1, Math.round(naturalHeight * scale));
 
@@ -364,10 +365,11 @@ function shouldMerge(
   const aH = a.y1 - a.y0;
   const bH = b.y1 - b.y0;
   const minH = Math.min(aH, bH);
-  const sameLine = Math.abs(aCy - bCy) < minH * 0.8;
+  const sameLine = Math.abs(aCy - bCy) < minH * 0.9;
   const gap = a.x1 <= b.x0 ? b.x0 - a.x1 : b.x1 <= a.x0 ? a.x0 - b.x1 : 0;
-  // Wider gap tolerance (3x height) so separated words on the same line merge.
-  if (sameLine && gap < minH * 3) return true;
+  // Wide gap tolerance (4x height) so separated words on the same line merge
+  // into one covered region — prevents half-covered text.
+  if (sameLine && gap < minH * 4) return true;
   return false;
 }
 
