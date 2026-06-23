@@ -139,7 +139,7 @@ async function loadTesseractCdn(): Promise<TesseractCdn | null> {
         return;
       }
       const script = document.createElement("script");
-      script.src = "https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js";
+      script.src = "https://cdn.jsdelivr.net/npm/tesseract.js@7/dist/tesseract.min.js";
       script.onload = () => resolve();
       script.onerror = () => reject(new Error("tesseract CDN load failed"));
       document.head.appendChild(script);
