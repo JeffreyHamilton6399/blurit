@@ -149,13 +149,14 @@ async function loadWorker(): Promise<TesseractWorker | null> {
 
 function isLikelyRealText(text: string): boolean {
   const t = text.trim();
-  // Only filter pure noise (1 char or all symbols). Keep everything else —
-  // better to cover too much than miss real text.
-  if (t.length < 1) return false;
+  // Require 2+ alphanumeric chars AND >50% alnum ratio. This filters out
+  // wall/texture noise (which OCR reads as random symbols) while keeping
+  // real text like "alamy", "ice", plate numbers, etc.
+  if (t.length < 2) return false;
   const alnum = (t.match(/[a-zA-Z0-9]/g) ?? []).length;
   const nonSpace = t.replace(/\s/g, "").length;
   if (nonSpace === 0) return false;
-  return alnum >= 1;
+  return alnum >= 2 && alnum / nonSpace > 0.5;
 }
 
 /**
@@ -243,10 +244,10 @@ export async function detectText(
     }
   }
   const allWords = (data?.words?.length ? data.words : nestedWords) ?? [];
-  // Low confidence threshold (25) to catch faint/partial text. Better to
-  // cover too much than miss text — user can erase extras.
+  // Confidence 50 — filters out low-confidence wall/texture noise while
+  // keeping real text. 25 was too low (caught walls), 70 too high (missed text).
   const words = allWords.filter(
-    (w) => w.confidence >= 25 && isLikelyRealText(w.text),
+    (w) => w.confidence >= 50 && isLikelyRealText(w.text),
   );
 
   if (words.length === 0) return [];
@@ -256,18 +257,30 @@ export async function detectText(
   const upScaleY = naturalHeight / dh;
 
   const regions: TextRegion[] = merged.map((g, i) => {
+    // Expand each region by 15% in each direction so the full text extent
+    // is covered. OCR word boxes are often tight, missing character edges.
+    const padX = g.w * 0.15;
+    const padY = g.h * 0.25; // more vertical padding for tall letters
     const r: Rect = {
-      x: g.x * upScaleX,
-      y: g.y * upScaleY,
-      width: g.w * upScaleX,
-      height: g.h * upScaleY,
+      x: (g.x - padX) * upScaleX,
+      y: (g.y - padY) * upScaleY,
+      width: (g.w + padX * 2) * upScaleX,
+      height: (g.h + padY * 2) * upScaleY,
     };
+    // Clamp to image bounds.
+    const clampedX = Math.max(0, r.x);
+    const clampedY = Math.max(0, r.y);
+    const clampedW = Math.min(naturalWidth - clampedX, r.width);
+    const clampedH = Math.min(naturalHeight - clampedY, r.height);
     return {
-      id: `text-t-${i}-${Math.round(r.x)}-${Math.round(r.y)}`,
+      id: `text-t-${i}-${Math.round(clampedX)}-${Math.round(clampedY)}`,
       kind: "text",
       label: g.label.slice(0, 24),
       blurred: false,
-      ...r,
+      x: clampedX,
+      y: clampedY,
+      width: clampedW,
+      height: clampedH,
     };
   });
 
