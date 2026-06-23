@@ -184,22 +184,28 @@ async function detectWithTesseract(
   naturalWidth: number, naturalHeight: number,
 ): Promise<TextRegion[]> {
   let worker: TesseractWorker | null = null;
-  try { worker = await loadWorker(); } catch { return []; }
-  if (!worker) return [];
-
-  const blob = await new Promise<Blob | null>((res) =>
-    canvas.toBlob((b) => res(b), "image/png"),
-  );
-  if (!blob) return [];
-  const url = URL.createObjectURL(blob);
-  let result: TesseractResult;
   try {
-    result = await worker.recognize(url, {}, { text: true, blocks: true });
-  } catch {
-    URL.revokeObjectURL(url);
+    worker = await loadWorker();
+  } catch (e) {
+    console.error("[BlurIt] Tesseract worker load failed:", e);
     return [];
   }
-  URL.revokeObjectURL(url);
+  if (!worker) {
+    console.error("[BlurIt] Tesseract worker is null");
+    return [];
+  }
+
+  let result: TesseractResult;
+  try {
+    // Pass the canvas directly — Tesseract v7's loadImage handles canvas
+    // elements via toBlob on the main thread. Blob URLs can fail in workers
+    // due to cross-origin or CSP issues.
+    result = await worker.recognize(canvas, {}, { text: true, blocks: true });
+    console.log("[BlurIt] Tesseract recognize done. text:", JSON.stringify(result?.data?.text?.slice(0, 80)), "blocks:", result?.data?.blocks?.length);
+  } catch (e) {
+    console.error("[BlurIt] Tesseract recognize failed:", e);
+    return [];
+  }
 
   const data = result?.data;
   const nestedWords: TesseractWord[] = [];
