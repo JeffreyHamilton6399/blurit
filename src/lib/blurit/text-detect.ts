@@ -149,11 +149,13 @@ async function loadWorker(): Promise<TesseractWorker | null> {
 
 function isLikelyRealText(text: string): boolean {
   const t = text.trim();
-  if (t.length < 2) return false;
+  // Only filter pure noise (1 char or all symbols). Keep everything else —
+  // better to cover too much than miss real text.
+  if (t.length < 1) return false;
   const alnum = (t.match(/[a-zA-Z0-9]/g) ?? []).length;
   const nonSpace = t.replace(/\s/g, "").length;
   if (nonSpace === 0) return false;
-  return alnum >= 2 && alnum / nonSpace > 0.4;
+  return alnum >= 1;
 }
 
 /**
@@ -241,8 +243,10 @@ export async function detectText(
     }
   }
   const allWords = (data?.words?.length ? data.words : nestedWords) ?? [];
+  // Low confidence threshold (25) to catch faint/partial text. Better to
+  // cover too much than miss text — user can erase extras.
   const words = allWords.filter(
-    (w) => w.confidence >= 40 && isLikelyRealText(w.text),
+    (w) => w.confidence >= 25 && isLikelyRealText(w.text),
   );
 
   if (words.length === 0) return [];
@@ -316,8 +320,8 @@ function mergeWords(
     }
   }
 
-  const minArea = (dw * dh) * 0.0001;
-  const maxArea = (dw * dh) * 0.6;
+  const minArea = (dw * dh) * 0.00005;
+  const maxArea = (dw * dh) * 0.7;
   return groups
     .filter((g) => {
       const area = (g.x1 - g.x0) * (g.y1 - g.y0);
@@ -347,9 +351,10 @@ function shouldMerge(
   const aH = a.y1 - a.y0;
   const bH = b.y1 - b.y0;
   const minH = Math.min(aH, bH);
-  const sameLine = Math.abs(aCy - bCy) < minH * 0.6;
+  const sameLine = Math.abs(aCy - bCy) < minH * 0.8;
   const gap = a.x1 <= b.x0 ? b.x0 - a.x1 : b.x1 <= a.x0 ? a.x0 - b.x1 : 0;
-  if (sameLine && gap < minH * 2.2) return true;
+  // Wider gap tolerance (3x height) so separated words on the same line merge.
+  if (sameLine && gap < minH * 3) return true;
   return false;
 }
 
