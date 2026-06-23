@@ -1,9 +1,9 @@
 // Text / license-plate / document detector.
 // Engine: native TextDetector (Chrome/Edge) → Tesseract.js v7 (npm package).
 //
-// Tesseract loads its worker/core/lang from jsdelivr CDN by default — this is
-// just library code + model data, NOT user photos. The photo is processed
-// entirely in the browser; nothing is uploaded.
+// Fully self-hosted — same as face detection. Worker, WASM core, and English
+// model all served from our own /tesseract/ directory (same-origin, no CDN,
+// no cross-origin worker issues). Photos never leave the browser.
 
 import type { TextRegion, Rect } from "./types";
 
@@ -105,12 +105,17 @@ async function loadWorker(): Promise<TesseractWorker | null> {
   if (!workerPromise) {
     workerPromise = (async () => {
       const { createWorker } = await import("tesseract.js");
-      // Use DEFAULT settings — Tesseract auto-loads worker/core/lang from
-      // jsdelivr CDN. This is the most reliable approach (no path mismatches,
-      // no version conflicts). Only library code + model data come from CDN;
-      // user photos stay in the browser.
+      const origin = typeof window !== "undefined" ? window.location.origin : "";
+      // FULLY SELF-HOSTED — same as face-api. All files served from our own
+      // domain (no CDN, no cross-origin worker issues). workerBlobURL:false
+      // loads the worker directly (no blob wrapper which can be blocked by CSP).
       const worker = (await createWorker(["eng"], 1, {
+        workerBlobURL: false,
+        workerPath: `${origin}/tesseract/worker.min.js`,
+        corePath: `${origin}/tesseract/tesseract-core-simd-lstm.js`,
+        langPath: `${origin}/tesseract`,
         logger: () => { /* progress only */ },
+        errorHandler: (e: unknown) => console.error("[BlurIt tesseract err]", e),
       })) as unknown as TesseractWorker;
       await worker.setParameters({ tessedit_pageseg_mode: "11" });
       return worker;
