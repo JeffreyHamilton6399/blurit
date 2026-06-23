@@ -1,71 +1,8 @@
 // Text / license-plate / document detector.
-// Engine: native TextDetector (Chrome/Edge) → Tesseract.js v7 (self-hosted).
-//
-// Tesseract runs with image preprocessing (grayscale + upscaling) and tries
-// BOTH PSM 3 (auto layout) and PSM 11 (sparse text) — merging results so we
-// catch text regardless of layout. Fully self-hosted, photos never leave browser.
+// Uses Tesseract.js v7 — the best free client-side OCR.
+// Self-hosted worker/core/lang. Photos never leave the browser.
 
 import type { TextRegion, Rect } from "./types";
-
-// ---- Native TextDetector (fast path) -----------------------------------
-
-interface NativeDetectedText {
-  boundingBox: DOMRectReadOnly;
-  rawValue?: string;
-}
-
-function isTextDetectorAvailable(): boolean {
-  return (
-    typeof window !== "undefined" &&
-    typeof (window as unknown as { TextDetector?: unknown }).TextDetector ===
-      "function"
-  );
-}
-
-async function detectWithNative(
-  canvas: HTMLCanvasElement,
-  dw: number,
-  dh: number,
-  naturalWidth: number,
-  naturalHeight: number,
-): Promise<TextRegion[] | null> {
-  if (!isTextDetectorAvailable()) return null;
-  try {
-    const TD = (window as unknown as {
-      TextDetector: new () => {
-        detect: (s: CanvasImageSource) => Promise<NativeDetectedText[]>;
-        release?: () => void;
-      };
-    }).TextDetector;
-    const detector = new TD();
-    const detected = await detector.detect(canvas);
-    try { detector.release?.(); } catch { /* ignore */ }
-    const upScaleX = naturalWidth / dw;
-    const upScaleY = naturalHeight / dh;
-    const regions: TextRegion[] = detected
-      .filter((d) => (d.rawValue ?? "").trim().length >= 2)
-      .map((d, i) => {
-        const b = d.boundingBox;
-        const padX = b.width * 0.15;
-        const padY = b.height * 0.25;
-        return {
-          id: `text-n-${i}-${Math.round(b.left)}-${Math.round(b.top)}`,
-          kind: "text" as const,
-          label: (d.rawValue ?? "text").trim().slice(0, 24),
-          blurred: false,
-          x: Math.max(0, (b.left - padX) * upScaleX),
-          y: Math.max(0, (b.top - padY) * upScaleY),
-          width: Math.min(naturalWidth, (b.width + padX * 2) * upScaleX),
-          height: Math.min(naturalHeight, (b.height + padY * 2) * upScaleY),
-        };
-      });
-    return regions;
-  } catch {
-    return null;
-  }
-}
-
-// ---- Tesseract.js v7 (self-hosted) -------------------------------------
 
 interface TesseractWord {
   text: string;
@@ -108,57 +45,16 @@ async function loadWorker(): Promise<TesseractWorker | null> {
         logger: () => {},
         errorHandler: (e: unknown) => console.error("[BlurIt tesseract err]", e),
       })) as unknown as TesseractWorker;
+      // PSM 3 = automatic page segmentation — the default, most reliable mode.
+      await worker.setParameters({ tessedit_pageseg_mode: "3" });
       return worker;
     })();
   }
   return workerPromise;
 }
 
-/** Preprocess: grayscale + contrast stretch. Helps OCR on photos. */
-function preprocess(ctx: CanvasRenderingContext2D, w: number, h: number) {
-  const imageData = ctx.getImageData(0, 0, w, h);
-  const d = imageData.data;
-  let min = 255, max = 0;
-  const gray = new Uint8ClampedArray(w * h);
-  for (let i = 0, j = 0; i < d.length; i += 4, j++) {
-    const g = (d[i] * 0.2126 + d[i + 1] * 0.7152 + d[i + 2] * 0.0722) | 0;
-    gray[j] = g;
-    if (g < min) min = g;
-    if (g > max) max = g;
-  }
-  const range = max - min || 1;
-  for (let i = 0, j = 0; i < d.length; i += 4, j++) {
-    const v = ((gray[j] - min) * 255) / range;
-    d[i] = d[i + 1] = d[i + 2] = v;
-  }
-  ctx.putImageData(imageData, 0, 0);
-}
-
-function isLikelyRealText(text: string): boolean {
-  const t = text.trim();
-  if (t.length < 2) return false;
-  const alnum = (t.match(/[a-zA-Z0-9]/g) ?? []).length;
-  const nonSpace = t.replace(/\s/g, "").length;
-  if (nonSpace === 0) return false;
-  return alnum >= 2 && alnum / nonSpace > 0.5;
-}
-
-/** Extract words from Tesseract v7 nested structure. */
-function extractWords(data: TesseractResult["data"]): TesseractWord[] {
-  const nestedWords: TesseractWord[] = [];
-  for (const block of data?.blocks ?? []) {
-    const blockAny = block as unknown as { lines?: TesseractLine[]; paragraphs?: TesseractParagraph[] };
-    const lines = blockAny.lines ?? [];
-    for (const paragraph of block?.paragraphs ?? blockAny.paragraphs ?? []) {
-      for (const line of paragraph?.lines ?? []) lines.push(line);
-    }
-    for (const line of lines) nestedWords.push(...(line.words ?? []));
-  }
-  return (data?.words?.length ? data.words : nestedWords) ?? [];
-}
-
 /**
- * Detect text regions. Tries native TextDetector → Tesseract (PSM 3 + PSM 11).
+ * Detect text regions via Tesseract OCR.
  */
 export async function detectText(
   bitmap: ImageBitmap,
@@ -166,95 +62,97 @@ export async function detectText(
   naturalHeight: number,
   onProgress?: (p: number) => void,
 ): Promise<TextRegion[]> {
-  // Upscale to 1500px for better small-text detection.
-  const longest = Math.max(naturalWidth, naturalHeight);
-  let scale = 1;
-  if (longest < 1500) scale = 1500 / longest;
-  if (longest > 2000) scale = 2000 / longest;
-  const dw = Math.max(1, Math.round(naturalWidth * scale));
-  const dh = Math.max(1, Math.round(naturalHeight * scale));
+  onProgress?.(0.1);
 
-  const canvas = document.createElement("canvas");
-  canvas.width = dw;
-  canvas.height = dh;
-  const ctx = canvas.getContext("2d", { willReadFrequently: true });
-  if (!ctx) return [];
-  ctx.drawImage(bitmap, 0, 0, dw, dh);
-  // Preprocess for better OCR.
-  preprocess(ctx, dw, dh);
-
-  // 1. Native TextDetector (instant, Chrome/Edge).
-  onProgress?.(0.2);
-  const nativeResult = await detectWithNative(canvas, dw, dh, naturalWidth, naturalHeight);
-  if (nativeResult !== null && nativeResult.length > 0) {
-    onProgress?.(1);
-    return nativeResult;
-  }
-
-  // 2. Tesseract — run BOTH PSM 3 (auto) and PSM 11 (sparse), merge results.
-  // PSM 3 is better for structured text (documents, signs with layout).
-  // PSM 11 is better for scattered text (watermarks, scattered signs).
-  onProgress?.(0.3);
+  // Load worker.
   let worker: TesseractWorker | null = null;
-  try { worker = await loadWorker(); } catch (e) { console.error("[BlurIt] worker load failed:", e); }
+  try {
+    worker = await loadWorker();
+  } catch (e) {
+    console.error("[BlurIt] Tesseract worker load failed:", e);
+    onProgress?.(1);
+    return [];
+  }
   if (!worker) { onProgress?.(1); return []; }
 
-  const upScaleX = naturalWidth / dw;
-  const upScaleY = naturalHeight / dh;
-  const allWords: TesseractWord[] = [];
+  // Create canvas at original resolution (no preprocessing — Tesseract
+  // handles color photos fine, preprocessing was hurting accuracy).
+  const canvas = document.createElement("canvas");
+  canvas.width = naturalWidth;
+  canvas.height = naturalHeight;
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  if (!ctx) { onProgress?.(1); return []; }
+  ctx.drawImage(bitmap, 0, 0, naturalWidth, naturalHeight);
 
-  for (const psm of ["3", "11"]) {
-    try {
-      await worker.setParameters({ tessedit_pageseg_mode: psm });
-      const result = await worker.recognize(canvas, {}, { text: true, blocks: true });
-      const words = extractWords(result?.data).filter(
-        (w) => w.confidence >= 50 && isLikelyRealText(w.text),
-      );
-      allWords.push(...words);
-    } catch (e) {
-      console.error(`[BlurIt] PSM ${psm} failed:`, e);
-    }
+  onProgress?.(0.3);
+
+  // Run OCR.
+  let result: TesseractResult;
+  try {
+    result = await worker.recognize(canvas, {}, { text: true, blocks: true });
+    console.log("[BlurIt] OCR done. text:", JSON.stringify(result?.data?.text?.slice(0, 100)), "blocks:", result?.data?.blocks?.length);
+  } catch (e) {
+    console.error("[BlurIt] OCR recognize failed:", e);
+    onProgress?.(1);
+    return [];
   }
 
-  if (allWords.length === 0) { onProgress?.(1); return []; }
+  onProgress?.(0.9);
 
-  // Dedupe + merge words into line regions.
-  const merged = mergeWords(allWords, dw, dh);
-  const regions: TextRegion[] = merged.map((g, i) => {
-    const padX = g.w * 0.15;
-    const padY = g.h * 0.25;
+  // Extract words from v7's nested structure.
+  const data = result?.data;
+  const words: TesseractWord[] = [];
+  for (const block of data?.blocks ?? []) {
+    const blockAny = block as unknown as { lines?: TesseractLine[]; paragraphs?: TesseractParagraph[] };
+    const lines = blockAny.lines ?? [];
+    for (const paragraph of block?.paragraphs ?? blockAny.paragraphs ?? []) {
+      for (const line of paragraph?.lines ?? []) lines.push(line);
+    }
+    for (const line of lines) words.push(...(line.words ?? []));
+  }
+  // Also check flat words array (some versions populate it).
+  const allWords = (data?.words?.length ? data.words : words) ?? [];
+
+  console.log("[BlurIt] total words:", allWords.length, "sample:", allWords.slice(0, 5).map((w) => w.text));
+
+  // Filter: keep words with reasonable confidence + real text.
+  const filtered = allWords.filter((w) => {
+    const t = w.text.trim();
+    return w.confidence >= 30 && t.length >= 2 && /[a-zA-Z0-9]/.test(t);
+  });
+
+  console.log("[BlurIt] filtered words:", filtered.length);
+  if (filtered.length === 0) { onProgress?.(1); return []; }
+
+  // Merge adjacent words on the same line into text regions.
+  const merged = mergeWords(filtered, naturalWidth, naturalHeight);
+  console.log("[BlurIt] merged regions:", merged.length);
+
+  onProgress?.(1);
+  return merged.map((g, i) => {
+    const padX = g.w * 0.1;
+    const padY = g.h * 0.15;
     return {
-      id: `text-t-${i}-${Math.round(g.x)}-${Math.round(g.y)}`,
+      id: `text-${i}-${Math.round(g.x)}-${Math.round(g.y)}`,
       kind: "text" as const,
       label: g.label.slice(0, 24),
       blurred: false,
-      x: Math.max(0, (g.x - padX) * upScaleX),
-      y: Math.max(0, (g.y - padY) * upScaleY),
-      width: Math.min(naturalWidth, (g.w + padX * 2) * upScaleX),
-      height: Math.min(naturalHeight, (g.h + padY * 2) * upScaleY),
+      x: Math.max(0, g.x - padX),
+      y: Math.max(0, g.y - padY),
+      width: Math.min(naturalWidth, g.w + padX * 2),
+      height: Math.min(naturalHeight, g.h + padY * 2),
     };
   });
-
-  onProgress?.(1);
-  return regions;
 }
 
 // ---- Word merging ------------------------------------------------------
 
 interface MergedGroup { x: number; y: number; w: number; h: number; label: string }
 
-function mergeWords(words: TesseractWord[], dw: number, dh: number): MergedGroup[] {
-  // Dedupe by approximate position (words from PSM 3 + PSM 11 overlap).
-  const seen = new Set<string>();
-  const unique = words.filter((w) => {
-    const key = `${Math.round(w.bbox.x0 / 10)}-${Math.round(w.bbox.y0 / 10)}`;
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
-
+function mergeWords(words: TesseractWord[], nw: number, nh: number): MergedGroup[] {
   const groups: { x0: number; y0: number; x1: number; y1: number; texts: string[] }[] =
-    unique.map((w) => ({ x0: w.bbox.x0, y0: w.bbox.y0, x1: w.bbox.x1, y1: w.bbox.y1, texts: [w.text] }));
+    words.map((w) => ({ x0: w.bbox.x0, y0: w.bbox.y0, x1: w.bbox.x1, y1: w.bbox.y1, texts: [w.text] }));
+
   let changed = true;
   while (changed) {
     changed = false;
@@ -270,14 +168,11 @@ function mergeWords(words: TesseractWord[], dw: number, dh: number): MergedGroup
       if (changed) break;
     }
   }
-  const minArea = (dw * dh) * 0.00005;
-  const maxArea = (dw * dh) * 0.7;
+
   return groups
     .filter((g) => {
       const area = (g.x1 - g.x0) * (g.y1 - g.y0);
-      if (area < minArea || area > maxArea) return false;
-      const label = g.texts.join(" ").replace(/\s+/g, " ").trim();
-      return isLikelyRealText(label);
+      return area > 20 && area < nw * nh * 0.5;
     })
     .map((g) => ({
       x: g.x0, y: g.y0, w: g.x1 - g.x0, h: g.y1 - g.y0,
@@ -287,15 +182,18 @@ function mergeWords(words: TesseractWord[], dw: number, dh: number): MergedGroup
 
 function shouldMerge(a: { x0: number; y0: number; x1: number; y1: number }, b: { x0: number; y0: number; x1: number; y1: number }): boolean {
   const tol = 4;
+  // Overlapping boxes merge.
   const overlapX = !(a.x1 + tol < b.x0 || b.x1 + tol < a.x0);
   const overlapY = !(a.y1 + tol < b.y0 || b.y1 + tol < a.y0);
   if (overlapX && overlapY) return true;
-  const aCy = (a.y0 + a.y1) / 2, bCy = (b.y0 + b.y1) / 2;
-  const aH = a.y1 - a.y0, bH = b.y1 - b.y0;
-  const minH = Math.min(aH, bH);
-  const sameLine = Math.abs(aCy - bCy) < minH * 0.9;
-  const gap = a.x1 <= b.x0 ? b.x0 - a.x1 : b.x1 <= a.x0 ? a.x0 - b.x1 : 0;
-  if (sameLine && gap < minH * 4) return true;
+  // Same-line neighbors merge if close horizontally.
+  const aCy = (a.y0 + a.y1) / 2;
+  const bCy = (b.y0 + b.y1) / 2;
+  const minH = Math.min(a.y1 - a.y0, b.y1 - b.y0);
+  if (Math.abs(aCy - bCy) < minH * 0.7) {
+    const gap = a.x1 <= b.x0 ? b.x0 - a.x1 : b.x1 <= a.x0 ? a.x0 - b.x1 : 0;
+    if (gap < minH * 3) return true;
+  }
   return false;
 }
 
