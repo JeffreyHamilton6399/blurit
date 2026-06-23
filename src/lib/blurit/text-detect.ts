@@ -1,9 +1,9 @@
 // Text / license-plate / document detector.
-// Engine: native TextDetector (Chrome/Edge) → Tesseract.js v7 (npm package).
+// Engine: native TextDetector (Chrome/Edge) → Tesseract.js v7 (self-hosted).
 //
-// Fully self-hosted — same as face detection. Worker, WASM core, and English
-// model all served from our own /tesseract/ directory (same-origin, no CDN,
-// no cross-origin worker issues). Photos never leave the browser.
+// Tesseract runs with image preprocessing (grayscale + upscaling) and tries
+// BOTH PSM 3 (auto layout) and PSM 11 (sparse text) — merging results so we
+// catch text regardless of layout. Fully self-hosted, photos never leave browser.
 
 import type { TextRegion, Rect } from "./types";
 
@@ -43,26 +43,20 @@ async function detectWithNative(
     const upScaleX = naturalWidth / dw;
     const upScaleY = naturalHeight / dh;
     const regions: TextRegion[] = detected
-      .filter((d) => {
-        const label = (d.rawValue ?? "").trim();
-        return label.length >= 2;
-      })
+      .filter((d) => (d.rawValue ?? "").trim().length >= 2)
       .map((d, i) => {
         const b = d.boundingBox;
         const padX = b.width * 0.15;
         const padY = b.height * 0.25;
-        const r: Rect = {
+        return {
+          id: `text-n-${i}-${Math.round(b.left)}-${Math.round(b.top)}`,
+          kind: "text" as const,
+          label: (d.rawValue ?? "text").trim().slice(0, 24),
+          blurred: false,
           x: Math.max(0, (b.left - padX) * upScaleX),
           y: Math.max(0, (b.top - padY) * upScaleY),
           width: Math.min(naturalWidth, (b.width + padX * 2) * upScaleX),
           height: Math.min(naturalHeight, (b.height + padY * 2) * upScaleY),
-        };
-        return {
-          id: `text-n-${i}-${Math.round(r.x)}-${Math.round(r.y)}`,
-          kind: "text" as const,
-          label: (d.rawValue ?? "text").trim().slice(0, 24),
-          blurred: false,
-          ...r,
         };
       });
     return regions;
@@ -71,7 +65,7 @@ async function detectWithNative(
   }
 }
 
-// ---- Tesseract.js v7 (npm package, default CDN paths) ------------------
+// ---- Tesseract.js v7 (self-hosted) -------------------------------------
 
 interface TesseractWord {
   text: string;
@@ -94,7 +88,7 @@ interface TesseractResult {
   data: { text?: string; words?: TesseractWord[]; blocks?: TesseractBlock[] };
 }
 interface TesseractWorker {
-  recognize: (image: string | Blob, opts?: Record<string, unknown>, output?: { text?: boolean; blocks?: boolean }) => Promise<TesseractResult>;
+  recognize: (image: CanvasImageSource | string | Blob, opts?: Record<string, unknown>, output?: { text?: boolean; blocks?: boolean }) => Promise<TesseractResult>;
   setParameters: (params: Record<string, string>) => Promise<void>;
   terminate: () => Promise<void>;
 }
@@ -106,22 +100,38 @@ async function loadWorker(): Promise<TesseractWorker | null> {
     workerPromise = (async () => {
       const { createWorker } = await import("tesseract.js");
       const origin = typeof window !== "undefined" ? window.location.origin : "";
-      // FULLY SELF-HOSTED — same as face-api. All files served from our own
-      // domain (no CDN, no cross-origin worker issues). workerBlobURL:false
-      // loads the worker directly (no blob wrapper which can be blocked by CSP).
       const worker = (await createWorker(["eng"], 1, {
         workerBlobURL: false,
         workerPath: `${origin}/tesseract/worker.min.js`,
         corePath: `${origin}/tesseract/tesseract-core-simd-lstm.js`,
         langPath: `${origin}/tesseract`,
-        logger: () => { /* progress only */ },
+        logger: () => {},
         errorHandler: (e: unknown) => console.error("[BlurIt tesseract err]", e),
       })) as unknown as TesseractWorker;
-      await worker.setParameters({ tessedit_pageseg_mode: "11" });
       return worker;
     })();
   }
   return workerPromise;
+}
+
+/** Preprocess: grayscale + contrast stretch. Helps OCR on photos. */
+function preprocess(ctx: CanvasRenderingContext2D, w: number, h: number) {
+  const imageData = ctx.getImageData(0, 0, w, h);
+  const d = imageData.data;
+  let min = 255, max = 0;
+  const gray = new Uint8ClampedArray(w * h);
+  for (let i = 0, j = 0; i < d.length; i += 4, j++) {
+    const g = (d[i] * 0.2126 + d[i + 1] * 0.7152 + d[i + 2] * 0.0722) | 0;
+    gray[j] = g;
+    if (g < min) min = g;
+    if (g > max) max = g;
+  }
+  const range = max - min || 1;
+  for (let i = 0, j = 0; i < d.length; i += 4, j++) {
+    const v = ((gray[j] - min) * 255) / range;
+    d[i] = d[i + 1] = d[i + 2] = v;
+  }
+  ctx.putImageData(imageData, 0, 0);
 }
 
 function isLikelyRealText(text: string): boolean {
@@ -133,8 +143,22 @@ function isLikelyRealText(text: string): boolean {
   return alnum >= 2 && alnum / nonSpace > 0.5;
 }
 
+/** Extract words from Tesseract v7 nested structure. */
+function extractWords(data: TesseractResult["data"]): TesseractWord[] {
+  const nestedWords: TesseractWord[] = [];
+  for (const block of data?.blocks ?? []) {
+    const blockAny = block as unknown as { lines?: TesseractLine[]; paragraphs?: TesseractParagraph[] };
+    const lines = blockAny.lines ?? [];
+    for (const paragraph of block?.paragraphs ?? blockAny.paragraphs ?? []) {
+      for (const line of paragraph?.lines ?? []) lines.push(line);
+    }
+    for (const line of lines) nestedWords.push(...(line.words ?? []));
+  }
+  return (data?.words?.length ? data.words : nestedWords) ?? [];
+}
+
 /**
- * Detect text regions. Tries native TextDetector → Tesseract.
+ * Detect text regions. Tries native TextDetector → Tesseract (PSM 3 + PSM 11).
  */
 export async function detectText(
   bitmap: ImageBitmap,
@@ -142,6 +166,7 @@ export async function detectText(
   naturalHeight: number,
   onProgress?: (p: number) => void,
 ): Promise<TextRegion[]> {
+  // Upscale to 1500px for better small-text detection.
   const longest = Math.max(naturalWidth, naturalHeight);
   let scale = 1;
   if (longest < 1500) scale = 1500 / longest;
@@ -155,77 +180,47 @@ export async function detectText(
   const ctx = canvas.getContext("2d", { willReadFrequently: true });
   if (!ctx) return [];
   ctx.drawImage(bitmap, 0, 0, dw, dh);
+  // Preprocess for better OCR.
+  preprocess(ctx, dw, dh);
 
   // 1. Native TextDetector (instant, Chrome/Edge).
   onProgress?.(0.2);
   const nativeResult = await detectWithNative(canvas, dw, dh, naturalWidth, naturalHeight);
-  if (nativeResult !== null) {
+  if (nativeResult !== null && nativeResult.length > 0) {
     onProgress?.(1);
     return nativeResult;
   }
 
-  // 2. Tesseract.js (reliable OCR with default CDN paths).
+  // 2. Tesseract — run BOTH PSM 3 (auto) and PSM 11 (sparse), merge results.
+  // PSM 3 is better for structured text (documents, signs with layout).
+  // PSM 11 is better for scattered text (watermarks, scattered signs).
   onProgress?.(0.3);
-  try {
-    const tessResult = await detectWithTesseract(canvas, dw, dh, naturalWidth, naturalHeight);
-    onProgress?.(1);
-    return tessResult;
-  } catch (e) {
-    console.error("[BlurIt] text detection failed:", e);
-  }
-
-  onProgress?.(1);
-  return [];
-}
-
-async function detectWithTesseract(
-  canvas: HTMLCanvasElement,
-  dw: number, dh: number,
-  naturalWidth: number, naturalHeight: number,
-): Promise<TextRegion[]> {
   let worker: TesseractWorker | null = null;
-  try {
-    worker = await loadWorker();
-  } catch (e) {
-    console.error("[BlurIt] Tesseract worker load failed:", e);
-    return [];
-  }
-  if (!worker) {
-    console.error("[BlurIt] Tesseract worker is null");
-    return [];
-  }
+  try { worker = await loadWorker(); } catch (e) { console.error("[BlurIt] worker load failed:", e); }
+  if (!worker) { onProgress?.(1); return []; }
 
-  let result: TesseractResult;
-  try {
-    // Pass the canvas directly — Tesseract v7's loadImage handles canvas
-    // elements via toBlob on the main thread. Blob URLs can fail in workers
-    // due to cross-origin or CSP issues.
-    result = await worker.recognize(canvas, {}, { text: true, blocks: true });
-    console.log("[BlurIt] Tesseract recognize done. text:", JSON.stringify(result?.data?.text?.slice(0, 80)), "blocks:", result?.data?.blocks?.length);
-  } catch (e) {
-    console.error("[BlurIt] Tesseract recognize failed:", e);
-    return [];
-  }
-
-  const data = result?.data;
-  const nestedWords: TesseractWord[] = [];
-  for (const block of data?.blocks ?? []) {
-    const blockAny = block as unknown as { lines?: TesseractLine[]; paragraphs?: TesseractParagraph[] };
-    const lines = blockAny.lines ?? [];
-    for (const paragraph of block?.paragraphs ?? blockAny.paragraphs ?? []) {
-      for (const line of paragraph?.lines ?? []) lines.push(line);
-    }
-    for (const line of lines) nestedWords.push(...(line.words ?? []));
-  }
-  const allWords = (data?.words?.length ? data.words : nestedWords) ?? [];
-  const words = allWords.filter((w) => w.confidence >= 50 && isLikelyRealText(w.text));
-  if (words.length === 0) return [];
-
-  const merged = mergeWords(words, dw, dh);
   const upScaleX = naturalWidth / dw;
   const upScaleY = naturalHeight / dh;
+  const allWords: TesseractWord[] = [];
 
-  return merged.map((g, i) => {
+  for (const psm of ["3", "11"]) {
+    try {
+      await worker.setParameters({ tessedit_pageseg_mode: psm });
+      const result = await worker.recognize(canvas, {}, { text: true, blocks: true });
+      const words = extractWords(result?.data).filter(
+        (w) => w.confidence >= 50 && isLikelyRealText(w.text),
+      );
+      allWords.push(...words);
+    } catch (e) {
+      console.error(`[BlurIt] PSM ${psm} failed:`, e);
+    }
+  }
+
+  if (allWords.length === 0) { onProgress?.(1); return []; }
+
+  // Dedupe + merge words into line regions.
+  const merged = mergeWords(allWords, dw, dh);
+  const regions: TextRegion[] = merged.map((g, i) => {
     const padX = g.w * 0.15;
     const padY = g.h * 0.25;
     return {
@@ -239,6 +234,9 @@ async function detectWithTesseract(
       height: Math.min(naturalHeight, (g.h + padY * 2) * upScaleY),
     };
   });
+
+  onProgress?.(1);
+  return regions;
 }
 
 // ---- Word merging ------------------------------------------------------
@@ -246,8 +244,17 @@ async function detectWithTesseract(
 interface MergedGroup { x: number; y: number; w: number; h: number; label: string }
 
 function mergeWords(words: TesseractWord[], dw: number, dh: number): MergedGroup[] {
+  // Dedupe by approximate position (words from PSM 3 + PSM 11 overlap).
+  const seen = new Set<string>();
+  const unique = words.filter((w) => {
+    const key = `${Math.round(w.bbox.x0 / 10)}-${Math.round(w.bbox.y0 / 10)}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+
   const groups: { x0: number; y0: number; x1: number; y1: number; texts: string[] }[] =
-    words.map((w) => ({ x0: w.bbox.x0, y0: w.bbox.y0, x1: w.bbox.x1, y1: w.bbox.y1, texts: [w.text] }));
+    unique.map((w) => ({ x0: w.bbox.x0, y0: w.bbox.y0, x1: w.bbox.x1, y1: w.bbox.y1, texts: [w.text] }));
   let changed = true;
   while (changed) {
     changed = false;
