@@ -75,58 +75,73 @@ export async function detectText(
   }
   if (!worker) { onProgress?.(1); return []; }
 
-  // Create canvas at original resolution (no preprocessing — Tesseract
-  // handles color photos fine, preprocessing was hurting accuracy).
+  // Upscale to 2000px longest side — bigger text = much better recognition.
+  // Tesseract's LSTM needs text to be at least ~20px tall; small photo text
+  // is often 10-15px, so 2x upscale makes it readable.
+  const longest = Math.max(naturalWidth, naturalHeight);
+  const targetLongest = 2000;
+  const scale = longest < targetLongest ? targetLongest / longest : 1;
+  const dw = Math.round(naturalWidth * scale);
+  const dh = Math.round(naturalHeight * scale);
+
   const canvas = document.createElement("canvas");
-  canvas.width = naturalWidth;
-  canvas.height = naturalHeight;
+  canvas.width = dw;
+  canvas.height = dh;
   const ctx = canvas.getContext("2d", { willReadFrequently: true });
   if (!ctx) { onProgress?.(1); return []; }
-  ctx.drawImage(bitmap, 0, 0, naturalWidth, naturalHeight);
+  // High-quality smoothing for upscaling.
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = "high";
+  ctx.drawImage(bitmap, 0, 0, dw, dh);
+
+  // Grayscale + normalize contrast — OCR works best on high-contrast B/W-ish.
+  grayscaleAndNormalize(ctx, dw, dh);
 
   onProgress?.(0.3);
 
-  // Run OCR.
-  let result: TesseractResult;
-  try {
-    result = await worker.recognize(canvas, {}, { text: true, blocks: true });
-    console.log("[BlurIt] OCR done. text:", JSON.stringify(result?.data?.text?.slice(0, 100)), "blocks:", result?.data?.blocks?.length);
-  } catch (e) {
-    console.error("[BlurIt] OCR recognize failed:", e);
-    onProgress?.(1);
-    return [];
-  }
+  // Run OCR with PSM 3 (auto) first, then PSM 11 (sparse) if nothing found.
+  // PSM 3 is good for structured text; PSM 11 catches scattered text.
+  let allWords: TesseractWord[] = [];
 
-  onProgress?.(0.9);
-
-  // Extract words from v7's nested structure.
-  const data = result?.data;
-  const words: TesseractWord[] = [];
-  for (const block of data?.blocks ?? []) {
-    const blockAny = block as unknown as { lines?: TesseractLine[]; paragraphs?: TesseractParagraph[] };
-    const lines = blockAny.lines ?? [];
-    for (const paragraph of block?.paragraphs ?? blockAny.paragraphs ?? []) {
-      for (const line of paragraph?.lines ?? []) lines.push(line);
+  for (const psm of ["3", "11"]) {
+    try {
+      await worker.setParameters({ tessedit_pageseg_mode: psm });
+      const result = await worker.recognize(canvas, {}, { text: true, blocks: true });
+      const words = extractWords(result?.data);
+      console.log(`[BlurIt] PSM ${psm}: ${words.length} words, text:`, JSON.stringify(result?.data?.text?.slice(0, 80)));
+      allWords.push(...words);
+    } catch (e) {
+      console.error(`[BlurIt] PSM ${psm} failed:`, e);
     }
-    for (const line of lines) words.push(...(line.words ?? []));
+    // If PSM 3 found words, skip PSM 11.
+    if (allWords.length > 0) break;
   }
-  // Also check flat words array (some versions populate it).
-  const allWords = (data?.words?.length ? data.words : words) ?? [];
 
-  console.log("[BlurIt] total words:", allWords.length, "sample:", allWords.slice(0, 5).map((w) => w.text));
-
-  // Filter: keep words with reasonable confidence + real text.
-  const filtered = allWords.filter((w) => {
-    const t = w.text.trim();
-    return w.confidence >= 30 && t.length >= 2 && /[a-zA-Z0-9]/.test(t);
+  // Dedupe words by position.
+  const seen = new Set<string>();
+  const deduped = allWords.filter((w) => {
+    const key = `${Math.round(w.bbox.x0 / 5)}-${Math.round(w.bbox.y0 / 5)}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
   });
 
-  console.log("[BlurIt] filtered words:", filtered.length);
+  // Filter: very low threshold (20) to catch faint text.
+  const filtered = deduped.filter((w) => {
+    const t = w.text.trim();
+    return w.confidence >= 20 && t.length >= 1 && /[a-zA-Z0-9]/.test(t);
+  });
+
+  console.log("[BlurIt] total:", allWords.length, "deduped:", deduped.length, "filtered:", filtered.length);
   if (filtered.length === 0) { onProgress?.(1); return []; }
 
-  // Merge adjacent words on the same line into text regions.
-  const merged = mergeWords(filtered, naturalWidth, naturalHeight);
+  // Merge adjacent words into text regions.
+  const merged = mergeWords(filtered, dw, dh);
   console.log("[BlurIt] merged regions:", merged.length);
+
+  // Scale back to natural coordinates.
+  const upScaleX = naturalWidth / dw;
+  const upScaleY = naturalHeight / dh;
 
   onProgress?.(1);
   return merged.map((g, i) => {
@@ -137,12 +152,55 @@ export async function detectText(
       kind: "text" as const,
       label: g.label.slice(0, 24),
       blurred: false,
-      x: Math.max(0, g.x - padX),
-      y: Math.max(0, g.y - padY),
-      width: Math.min(naturalWidth, g.w + padX * 2),
-      height: Math.min(naturalHeight, g.h + padY * 2),
+      x: Math.max(0, (g.x - padX) * upScaleX),
+      y: Math.max(0, (g.y - padY) * upScaleY),
+      width: Math.min(naturalWidth, (g.w + padX * 2) * upScaleX),
+      height: Math.min(naturalHeight, (g.h + padY * 2) * upScaleY),
     };
   });
+}
+
+/** Extract words from Tesseract v7's nested structure. */
+function extractWords(data: TesseractResult["data"]): TesseractWord[] {
+  const words: TesseractWord[] = [];
+  for (const block of data?.blocks ?? []) {
+    const blockAny = block as unknown as { lines?: TesseractLine[]; paragraphs?: TesseractParagraph[] };
+    const lines = blockAny.lines ?? [];
+    for (const paragraph of block?.paragraphs ?? blockAny.paragraphs ?? []) {
+      for (const line of paragraph?.lines ?? []) lines.push(line);
+    }
+    for (const line of lines) words.push(...(line.words ?? []));
+  }
+  return (data?.words?.length ? data.words : words) ?? [];
+}
+
+/**
+ * Convert to grayscale and normalize contrast using histogram stretching.
+ * This is THE key preprocessing step for OCR on photos — Tesseract expects
+ * high-contrast black-on-white text, not color photos.
+ */
+function grayscaleAndNormalize(ctx: CanvasRenderingContext2D, w: number, h: number) {
+  const imageData = ctx.getImageData(0, 0, w, h);
+  const d = imageData.data;
+
+  // Grayscale (luminance) + find min/max for contrast stretch.
+  let min = 255, max = 0;
+  const gray = new Uint8ClampedArray(w * h);
+  for (let i = 0, j = 0; i < d.length; i += 4, j++) {
+    const g = (d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114) | 0;
+    gray[j] = g;
+    if (g < min) min = g;
+    if (g > max) max = g;
+  }
+
+  // Stretch contrast to full 0-255 range.
+  const range = max - min || 1;
+  for (let i = 0, j = 0; i < d.length; i += 4, j++) {
+    const v = ((gray[j] - min) * 255) / range;
+    d[i] = d[i + 1] = d[i + 2] = v;
+  }
+
+  ctx.putImageData(imageData, 0, 0);
 }
 
 // ---- Word merging ------------------------------------------------------
