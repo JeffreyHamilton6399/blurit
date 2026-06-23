@@ -1,14 +1,10 @@
 // Text / license-plate / document detector.
 // Engine priority: native TextDetector API (Chrome/Edge, instant)
-// -> PaddleOCR PP-OCRv3 (CDN library, self-hosted model — best for scene text)
-// -> Tesseract.js (CDN library, self-hosted model — fallback)
+// -> Tesseract.js (CDN library, self-hosted model — reliable fallback)
 //
-// PaddleOCR is specifically trained on SCENE TEXT (signs, plates, watermarks)
-// and is far more accurate than Tesseract on photos. Tesseract is the fallback
-// for browsers where PaddleOCR fails to load.
-//
-// Privacy: ALL model weights are SELF-HOSTED. Only the library code loads from
-// CDN (jsdelivr). The photo is processed entirely in the browser.
+// Tesseract is the best free client-side OCR. It works in all browsers.
+// The library code loads from CDN (jsdelivr); model weights are self-hosted.
+// Your photo is processed entirely in the browser; nothing is uploaded.
 
 import type { TextRegion, Rect } from "./types";
 
@@ -76,180 +72,7 @@ async function detectWithNative(
   }
 }
 
-// ---- PaddleOCR PP-OCRv3 (best for scene text) --------------------------
-
-interface PaddleOcrResult {
-  text: string[];
-  points: number[][][];
-}
-
-interface PaddleOcrGlobal {
-  init: (detModel?: string, recModel?: string) => Promise<void>;
-  recognize: (image: HTMLImageElement) => Promise<PaddleOcrResult>;
-}
-
-let paddlePromise: Promise<PaddleOcrGlobal | null> | null = null;
-
-async function loadPaddle(): Promise<PaddleOcrGlobal | null> {
-  if (paddlePromise) return paddlePromise;
-  paddlePromise = (async () => {
-    await new Promise<void>((resolve, reject) => {
-      const s = document.createElement("script");
-      s.src = "https://cdn.jsdelivr.net/npm/@paddle-js-models/ocr@4.1.1/lib/index.js";
-      s.onload = () => resolve();
-      s.onerror = () => reject(new Error("paddle OCR load failed"));
-      document.head.appendChild(s);
-    })();
-    const ocr = (window as unknown as { ocr?: PaddleOcrGlobal }).ocr;
-    if (!ocr) return null;
-    await ocr.init("/models/paddle-ocr/det", "/models/paddle-ocr/rec");
-    return ocr;
-  })();
-  return paddlePromise;
-}
-
-function bitmapToImage(bitmap: ImageBitmap): Promise<HTMLImageElement> {
-  const canvas = document.createElement("canvas");
-  canvas.width = bitmap.width;
-  canvas.height = bitmap.height;
-  const ctx = canvas.getContext("2d");
-  if (!ctx) return Promise.reject(new Error("no ctx"));
-  ctx.drawImage(bitmap, 0, 0);
-  const url = canvas.toDataURL("image/png");
-  return new Promise((resolve, reject) => {
-    const img = new Image();
-    img.onload = () => resolve(img);
-    img.onerror = reject;
-    img.src = url;
-  });
-}
-
-function polygonToRect(pts: number[][]): Rect {
-  const xs = pts.map((p) => p[0]);
-  const ys = pts.map((p) => p[1]);
-  const x = Math.min(...xs);
-  const y = Math.min(...ys);
-  return {
-    x,
-    y,
-    width: Math.max(...xs) - x,
-    height: Math.max(...ys) - y,
-  };
-}
-
-function isLikelyRealText(text: string): boolean {
-  const t = text.trim();
-  if (t.length < 2) return false;
-  const alnum = (t.match(/[a-zA-Z0-9]/g) ?? []).length;
-  const nonSpace = t.replace(/\s/g, "").length;
-  if (nonSpace === 0) return false;
-  return alnum >= 2 && alnum / nonSpace > 0.5;
-}
-
-/**
- * Detect text regions. Tries native TextDetector → PaddleOCR → Tesseract.
- */
-export async function detectText(
-  bitmap: ImageBitmap,
-  naturalWidth: number,
-  naturalHeight: number,
-  onProgress?: (p: number) => void,
-): Promise<TextRegion[]> {
-  // Detection canvas — upscale to 1500px for better small-text detection.
-  const longest = Math.max(naturalWidth, naturalHeight);
-  let scale = 1;
-  if (longest < 1500) scale = 1500 / longest;
-  if (longest > 2000) scale = 2000 / longest;
-  const dw = Math.max(1, Math.round(naturalWidth * scale));
-  const dh = Math.max(1, Math.round(naturalHeight * scale));
-
-  const canvas = document.createElement("canvas");
-  canvas.width = dw;
-  canvas.height = dh;
-  const ctx = canvas.getContext("2d", { willReadFrequently: true });
-  if (!ctx) return [];
-  ctx.drawImage(bitmap, 0, 0, dw, dh);
-
-  // 1. Native TextDetector (instant, Chrome/Edge).
-  onProgress?.(0.2);
-  const nativeResult = await detectWithNative(canvas, dw, dh, naturalWidth, naturalHeight);
-  if (nativeResult !== null) {
-    onProgress?.(1);
-    return nativeResult;
-  }
-
-  // 2. PaddleOCR PP-OCRv3 (best for scene text: signs, plates, watermarks).
-  onProgress?.(0.3);
-  try {
-    const paddleResult = await detectWithPaddle(bitmap, naturalWidth, naturalHeight);
-    if (paddleResult.length > 0) {
-      onProgress?.(1);
-      return paddleResult;
-    }
-  } catch { /* fall through to Tesseract */ }
-
-  // 3. Tesseract.js fallback.
-  onProgress?.(0.5);
-  try {
-    const tessResult = await detectWithTesseract(canvas, dw, dh, naturalWidth, naturalHeight);
-    onProgress?.(1);
-    return tessResult;
-  } catch { /* fall through */ }
-
-  onProgress?.(1);
-  return [];
-}
-
-async function detectWithPaddle(
-  bitmap: ImageBitmap,
-  naturalWidth: number,
-  naturalHeight: number,
-): Promise<TextRegion[]> {
-  const ocr = await loadPaddle();
-  if (!ocr) return [];
-
-  let img: HTMLImageElement;
-  try {
-    img = await bitmapToImage(bitmap);
-  } catch {
-    return [];
-  }
-
-  const result = await ocr.recognize(img);
-  const { text, points } = result;
-  if (!text || !points || text.length === 0) return [];
-
-  const scaleX = naturalWidth / img.naturalWidth;
-  const scaleY = naturalHeight / img.naturalHeight;
-
-  const regions: TextRegion[] = [];
-  for (let i = 0; i < text.length; i++) {
-    const label = text[i];
-    if (!isLikelyRealText(label)) continue;
-    const poly = points[i];
-    if (!poly || poly.length < 4) continue;
-    const r = polygonToRect(poly);
-    const padX = r.width * 0.15;
-    const padY = r.height * 0.25;
-    const scaled: Rect = {
-      x: Math.max(0, (r.x - padX) * scaleX),
-      y: Math.max(0, (r.y - padY) * scaleY),
-      width: Math.min(naturalWidth, (r.width + padX * 2) * scaleX),
-      height: Math.min(naturalHeight, (r.height + padY * 2) * scaleY),
-    };
-    if (scaled.width < 8 || scaled.height < 8) continue;
-    regions.push({
-      id: `text-p-${i}-${Math.round(scaled.x)}-${Math.round(scaled.y)}`,
-      kind: "text",
-      label: label.slice(0, 24),
-      blurred: false,
-      ...scaled,
-    });
-  }
-  return regions;
-}
-
-// ---- Tesseract.js fallback ---------------------------------------------
+// ---- Tesseract.js (reliable OCR fallback) ------------------------------
 
 interface TesseractWord {
   text: string;
@@ -314,11 +137,65 @@ async function loadWorker(): Promise<TesseractWorker | null> {
         logger: () => { /* progress only */ },
         errorHandler: (e: unknown) => console.error("[BlurIt tesseract err]", e),
       });
+      // PSM 11 = SPARSE_TEXT: find text anywhere in the image.
       await worker.setParameters({ tessedit_pageseg_mode: "11" });
       return worker;
     })();
   }
   return workerPromise;
+}
+
+function isLikelyRealText(text: string): boolean {
+  const t = text.trim();
+  if (t.length < 2) return false;
+  const alnum = (t.match(/[a-zA-Z0-9]/g) ?? []).length;
+  const nonSpace = t.replace(/\s/g, "").length;
+  if (nonSpace === 0) return false;
+  return alnum >= 2 && alnum / nonSpace > 0.5;
+}
+
+/**
+ * Detect text regions. Tries native TextDetector → Tesseract.
+ */
+export async function detectText(
+  bitmap: ImageBitmap,
+  naturalWidth: number,
+  naturalHeight: number,
+  onProgress?: (p: number) => void,
+): Promise<TextRegion[]> {
+  // Detection canvas — upscale to 1500px for better small-text detection.
+  const longest = Math.max(naturalWidth, naturalHeight);
+  let scale = 1;
+  if (longest < 1500) scale = 1500 / longest;
+  if (longest > 2000) scale = 2000 / longest;
+  const dw = Math.max(1, Math.round(naturalWidth * scale));
+  const dh = Math.max(1, Math.round(naturalHeight * scale));
+
+  const canvas = document.createElement("canvas");
+  canvas.width = dw;
+  canvas.height = dh;
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  if (!ctx) return [];
+  ctx.drawImage(bitmap, 0, 0, dw, dh);
+
+  // 1. Native TextDetector (instant, Chrome/Edge).
+  onProgress?.(0.2);
+  const nativeResult = await detectWithNative(canvas, dw, dh, naturalWidth, naturalHeight);
+  if (nativeResult !== null) {
+    onProgress?.(1);
+    return nativeResult;
+  }
+
+  // 2. Tesseract.js (reliable OCR).
+  onProgress?.(0.3);
+  try {
+    const tessResult = await detectWithTesseract(canvas, dw, dh, naturalWidth, naturalHeight);
+    onProgress?.(1);
+    return tessResult;
+  } catch { /* fall through */ }
+
+  onProgress?.(1);
+  return [];
 }
 
 async function detectWithTesseract(
@@ -337,6 +214,7 @@ async function detectWithTesseract(
   const url = URL.createObjectURL(blob);
   let result: TesseractResult;
   try {
+    // v7: MUST pass output { text: true, blocks: true } to get word boxes.
     result = await worker.recognize(url, {}, { text: true, blocks: true });
   } catch {
     URL.revokeObjectURL(url);
@@ -378,7 +256,7 @@ async function detectWithTesseract(
   });
 }
 
-// ---- Word merging (Tesseract fallback) ---------------------------------
+// ---- Word merging ------------------------------------------------------
 
 interface MergedGroup { x: number; y: number; w: number; h: number; label: string }
 
