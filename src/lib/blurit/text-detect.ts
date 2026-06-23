@@ -1,6 +1,9 @@
 // Text / license-plate / document detector.
 // Engine: native TextDetector (Chrome/Edge) → Tesseract.js v7 (npm package).
-// Model weights self-hosted at /tesseract/. Photos never leave the browser.
+//
+// Tesseract loads its worker/core/lang from jsdelivr CDN by default — this is
+// just library code + model data, NOT user photos. The photo is processed
+// entirely in the browser; nothing is uploaded.
 
 import type { TextRegion, Rect } from "./types";
 
@@ -68,7 +71,7 @@ async function detectWithNative(
   }
 }
 
-// ---- Tesseract.js v7 (npm package) -------------------------------------
+// ---- Tesseract.js v7 (npm package, default CDN paths) ------------------
 
 interface TesseractWord {
   text: string;
@@ -102,14 +105,12 @@ async function loadWorker(): Promise<TesseractWorker | null> {
   if (!workerPromise) {
     workerPromise = (async () => {
       const { createWorker } = await import("tesseract.js");
-      const origin = typeof window !== "undefined" ? window.location.origin : "";
+      // Use DEFAULT settings — Tesseract auto-loads worker/core/lang from
+      // jsdelivr CDN. This is the most reliable approach (no path mismatches,
+      // no version conflicts). Only library code + model data come from CDN;
+      // user photos stay in the browser.
       const worker = (await createWorker(["eng"], 1, {
-        workerBlobURL: false,
-        workerPath: `${origin}/tesseract/worker.min.js`,
-        corePath: `${origin}/tesseract/tesseract-core-simd-lstm.js`,
-        langPath: `${origin}/tesseract`,
         logger: () => { /* progress only */ },
-        errorHandler: (e: unknown) => console.error("[BlurIt tesseract err]", e),
       })) as unknown as TesseractWorker;
       await worker.setParameters({ tessedit_pageseg_mode: "11" });
       return worker;
@@ -158,13 +159,15 @@ export async function detectText(
     return nativeResult;
   }
 
-  // 2. Tesseract.js (reliable OCR).
+  // 2. Tesseract.js (reliable OCR with default CDN paths).
   onProgress?.(0.3);
   try {
     const tessResult = await detectWithTesseract(canvas, dw, dh, naturalWidth, naturalHeight);
     onProgress?.(1);
     return tessResult;
-  } catch { /* fall through */ }
+  } catch (e) {
+    console.error("[BlurIt] text detection failed:", e);
+  }
 
   onProgress?.(1);
   return [];
