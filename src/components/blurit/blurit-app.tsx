@@ -11,7 +11,6 @@ import { Dropzone } from "./dropzone";
 import { PhotoCanvas } from "./photo-canvas";
 import { EditorSidebar } from "./editor-sidebar";
 import { SettingsMenu, DONATE_URL } from "./settings-menu";
-import { TermsGate } from "./terms-gate";
 import { decodeFile, canvasToBlob, outputFileName, isAccepted } from "@/lib/blurit/image";
 import { detectFaces } from "@/lib/blurit/face-detect";
 import { detectText, terminateTextWorker } from "@/lib/blurit/text-detect";
@@ -526,7 +525,6 @@ export function BlurItApp() {
       {/* Footer */}
       <SiteFooter />
 
-      <TermsGate />
     </div>
   );
 }
