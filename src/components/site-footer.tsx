@@ -1,11 +1,8 @@
-import { FEEDBACK_MAILTO } from "@/components/feedback-button";
-
 const GITHUB_URL = "https://github.com/JeffreyHamilton6399";
 
 /**
- * The one footer every Jeffrey Hamilton tool shares: version, byline, and a
- * second way to reach the feedback inbox for anyone who scrolls past the
- * header button.
+ * The one footer every Jeffrey Hamilton tool shares. Feedback deliberately
+ * lives only in the header pill — one obvious entry point beats two quiet ones.
  */
 export function SiteFooter() {
   return (
@@ -21,15 +18,6 @@ export function SiteFooter() {
         className="font-medium transition-colors hover:text-foreground"
       >
         Jeffrey Hamilton
-      </a>
-      <span className="opacity-40" aria-hidden>
-        ·
-      </span>
-      <a
-        href={FEEDBACK_MAILTO}
-        className="transition-colors hover:text-foreground"
-      >
-        Feedback
       </a>
     </footer>
   );

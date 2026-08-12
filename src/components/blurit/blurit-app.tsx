@@ -12,7 +12,6 @@ import { PhotoCanvas } from "./photo-canvas";
 import { EditorSidebar } from "./editor-sidebar";
 import { SettingsMenu, DONATE_URL } from "./settings-menu";
 import { TermsGate } from "./terms-gate";
-import { LegalDialog, type LegalKind } from "./legal-dialog";
 import { decodeFile, canvasToBlob, outputFileName, isAccepted } from "@/lib/blurit/image";
 import { detectFaces } from "@/lib/blurit/face-detect";
 import { detectText, terminateTextWorker } from "@/lib/blurit/text-detect";
@@ -69,7 +68,6 @@ export function BlurItApp() {
   const [detecting, setDetecting] = React.useState(false);
   const [detectionNote, setDetectionNote] = React.useState("");
   const [downloading, setDownloading] = React.useState(false);
-  const [legalKind, setLegalKind] = React.useState<LegalKind>(null);
 
   const manualIdRef = React.useRef(0);
   const runIdRef = React.useRef(0);
@@ -417,12 +415,7 @@ export function BlurItApp() {
               <span className="hidden sm:inline">Donate</span>
             </a>
           </Button>
-          <SettingsMenu
-            onOpenPrivacy={() => setLegalKind("privacy")}
-            onOpenTerms={() => setLegalKind("terms")}
-            modes={modes}
-            setModes={setModes}
-          />
+          <SettingsMenu modes={modes} setModes={setModes} />
         </div>
       </header>
 
@@ -534,7 +527,6 @@ export function BlurItApp() {
       <SiteFooter />
 
       <TermsGate />
-      <LegalDialog kind={legalKind} onClose={() => setLegalKind(null)} />
     </div>
   );
 }
