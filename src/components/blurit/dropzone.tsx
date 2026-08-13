@@ -44,14 +44,14 @@ export function Dropzone({ onFile, onError, busy }: DropzoneProps) {
         if (busy) return;
         handleFiles(e.dataTransfer.files);
       }}
-      className="flex min-h-0 w-full flex-1 items-center justify-center p-3"
+      className="flex min-h-0 w-full flex-1 overflow-y-auto p-3"
     >
       <button
         type="button"
         disabled={busy}
         onClick={() => inputRef.current?.click()}
         className={cn(
-          "group relative mx-auto flex min-h-[300px] w-full max-w-md flex-col items-center justify-center gap-3 rounded-xl border-2 border-dashed px-6 py-10 text-center transition-colors",
+          "group relative m-auto flex min-h-[300px] w-full max-w-md shrink-0 flex-col items-center justify-center gap-3 rounded-xl border-2 border-dashed px-6 py-10 text-center transition-colors",
           "border-border hover:border-emerald-500/60 hover:bg-emerald-500/[0.04]",
           dragging && "border-emerald-500 bg-emerald-500/[0.06]",
           busy && "pointer-events-none opacity-60",
