@@ -51,7 +51,7 @@ export function Dropzone({ onFile, onError, busy }: DropzoneProps) {
         disabled={busy}
         onClick={() => inputRef.current?.click()}
         className={cn(
-          "group relative flex w-full max-w-md flex-col items-center justify-center gap-3 rounded-xl border-2 border-dashed px-6 py-10 text-center transition-colors",
+          "group relative mx-auto flex min-h-[300px] w-full max-w-md flex-col items-center justify-center gap-3 rounded-xl border-2 border-dashed px-6 py-10 text-center transition-colors",
           "border-border hover:border-emerald-500/60 hover:bg-emerald-500/[0.04]",
           dragging && "border-emerald-500 bg-emerald-500/[0.06]",
           busy && "pointer-events-none opacity-60",
@@ -60,19 +60,16 @@ export function Dropzone({ onFile, onError, busy }: DropzoneProps) {
         <span className="flex size-12 items-center justify-center rounded-full bg-emerald-500/10 text-emerald-600 dark:text-emerald-400">
           <ImagePlus className="size-6" />
         </span>
-        <span className="space-y-1">
-          <span className="block text-base font-semibold">
-            Drop a photo
-          </span>
-          <span className="block text-sm text-muted-foreground">
-            Blur faces and sensitive info before sharing — privately in your
-            browser
-          </span>
-          <span className="mt-1 block text-xs text-muted-foreground">
-            or paste from clipboard
-          </span>
+        <span className="block text-base font-semibold tracking-tight">
+          Drop a photo
         </span>
-        <span className="mt-2 inline-flex items-center gap-1.5 rounded-full bg-muted px-3 py-1 text-xs font-medium text-muted-foreground">
+        <span className="block max-w-[34ch] text-sm text-muted-foreground">
+          Blur faces, plates, and sensitive text — right in your browser.
+        </span>
+        <span className="block text-xs text-muted-foreground/70">
+          or paste from clipboard
+        </span>
+        <span className="mt-1 inline-flex items-center gap-1.5 rounded-full bg-muted px-3 py-1 text-xs font-medium text-muted-foreground">
           <ShieldCheck className="size-3.5 text-emerald-500" />
           No uploads · No sign-up · 100% free
         </span>
